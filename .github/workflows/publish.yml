@@ -1,86 +1,109 @@
-name: publish
+name: Release
 
 on:
   push:
     tags:
-      - 'v*.*.*'
-    branches: [ ]
+      - "v*.*.*"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  publish-tauri:
-    permissions:
-      contents: write
+  build-artifacts:
+    name: Build ${{ matrix.platform.name }} release artifact
+    runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - platform: windows-latest
-            target: x86_64-pc-windows-msvc
-
-          - platform: ubuntu-latest
+        platform:
+          - name: Linux
+            runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-
-    runs-on: ${{ matrix.platform }}
+            artifact_name: cpkg-linux-x86_64
+          - name: Windows (GNU)
+            runner: windows-latest
+            target: x86_64-pc-windows-gnu
+            artifact_name: cpkg-windows-x86_64
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source
+        uses: actions/checkout@v4
 
-      #      - name: Install Linux dependencies
-      #        if: runner.os == 'Linux'
-      #        run: |
-      #          sudo apt-get update
-      #          sudo apt-get install -y \
-      #            libglib2.0-dev pkg-config libgtk-3-dev javascriptcoregtk-4.1 \
-      #            libsoup-3.0 webkit2gtk-4.1
+      - name: Setup MinGW
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.platform.target }}
 
-      - uses: actions/cache@v4
-        with:
-          path: |
-            target
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
 
+      - name: Build release binary
+        if: runner.os != 'Windows'
+        run: cargo build --release --locked --target ${{ matrix.platform.target }}
 
-      # ---------- 构建 Tauri ----------
-      - name: Build app
-        run: |
-          cargo build -r --target ${{ matrix.target }}
+      - name: Build release binary
+        if: runner.os == 'Windows'
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: gcc
+        run: cargo build --release --locked --target ${{ matrix.platform.target }}
 
-      # ---------- 打包 artifacts ----------
-      - name: Package Linux
+      - name: Package Linux archive
         if: runner.os == 'Linux'
         run: |
-          VERSION=${GITHUB_REF_NAME}
-          mkdir -p artifacts
-          cp target/${{ matrix.target }}/release/cpkg artifacts/cpkg-linux-${VERSION}
+          VERSION="${GITHUB_REF_NAME}"
+          PACKAGE_DIR="dist/cpkg-${VERSION}-x86_64-unknown-linux-gnu"
+          mkdir -p "${PACKAGE_DIR}"
+          cp "target/${{ matrix.platform.target }}/release/cpkg" "${PACKAGE_DIR}/"
+          cp README.md LICENSE "${PACKAGE_DIR}/"
+          tar -czf "${PACKAGE_DIR}.tar.gz" -C dist "$(basename "${PACKAGE_DIR}")"
+          rm -rf "${PACKAGE_DIR}"
 
-      - name: Package Windows
+      - name: Package Windows archive
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $VERSION = "${{ github.ref_name }}"
-          
-          # create artifacts folder
-          $artifacts = "artifacts"
-          New-Item -ItemType Directory -Force -Path $artifacts
-          
-          # copy exe and rename
-          $EXE_NAME = "cpkg-windows-$VERSION.exe"
-          Copy-Item -Path "target/${{ matrix.target }}/release/cpkg.exe" -Destination "$artifacts/$EXE_NAME" -Force
+          $version = "${{ github.ref_name }}"
+          $packageDir = "dist/cpkg-$version-x86_64-pc-windows-gnu"
+          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+          Copy-Item "target/${{ matrix.platform.target }}/release/cpkg.exe" "$packageDir/cpkg.exe" -Force
+          Copy-Item "README.md" "$packageDir/README.md" -Force
+          Copy-Item "LICENSE" "$packageDir/LICENSE" -Force
+          Compress-Archive -Path "$packageDir/*" -DestinationPath "$packageDir.zip" -Force
+          Remove-Item $packageDir -Recurse -Force
 
-      # ---------- 上传 Release ----------
-      - name: Upload Release Assets
-        uses: softprops/action-gh-release@v1
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: artifacts/*
+          name: ${{ matrix.platform.artifact_name }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub release
+    needs: build-artifacts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: cpkg-*
+          merge-multiple: true
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
           generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
