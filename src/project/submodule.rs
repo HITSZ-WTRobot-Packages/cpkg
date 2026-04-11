@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::info;
 
@@ -88,6 +88,49 @@ fn is_registered_submodule(root: &Path, rel_path: &str) -> Result<bool> {
     }))
 }
 
+fn git_common_dir(root: &Path) -> Result<PathBuf> {
+    let git_dir = run_git(
+        root,
+        &["rev-parse", "--git-common-dir"],
+        "resolving git dir",
+        false,
+    )?;
+    let git_dir = PathBuf::from(git_dir);
+
+    if git_dir.is_absolute() {
+        Ok(git_dir)
+    } else {
+        Ok(root.join(git_dir))
+    }
+}
+
+fn submodule_git_dir(root: &Path, rel_path: &str) -> Result<PathBuf> {
+    let mut path = git_common_dir(root)?.join("modules");
+    for component in Path::new(rel_path).components() {
+        path.push(component);
+    }
+    Ok(path)
+}
+
+fn remove_stale_submodule_git_dir(root: &Path, rel_path: &str) -> Result<()> {
+    let git_dir = submodule_git_dir(root, rel_path)?;
+    if !git_dir.exists() {
+        return Ok(());
+    }
+
+    fs::remove_dir_all(&git_dir).with_context(|| {
+        format!(
+            "failed to remove stale submodule git directory '{}'",
+            git_dir.display()
+        )
+    })?;
+    info!(
+        "removed stale submodule git directory {}",
+        git_dir.display()
+    );
+    Ok(())
+}
+
 fn sync_repository(root: &Path, repository: &ManagedRepository) -> Result<()> {
     let rel_path = repository.rel_path.as_str();
     let abs_path = root.join(rel_path);
@@ -101,6 +144,7 @@ fn sync_repository(root: &Path, repository: &ManagedRepository) -> Result<()> {
     }
 
     if !registered {
+        remove_stale_submodule_git_dir(root, rel_path)?;
         run_git(
             root,
             &["submodule", "add", "-b", "main", &repository.url, rel_path],
@@ -195,6 +239,7 @@ fn remove_repository(root: &Path, repository_name: &str) -> Result<()> {
         &format!("removing submodule {repository_name}"),
         false,
     )?;
+    remove_stale_submodule_git_dir(root, &rel_path)?;
     info!("removed submodule {}", repository_name);
     Ok(())
 }
@@ -230,8 +275,46 @@ pub fn remove_unused_repositories(
 
 #[cfg(test)]
 mod tests {
-    use super::repository_names_to_remove;
+    use super::{remove_repository, repository_names_to_remove, submodule_git_dir};
     use crate::project::resolver::ManagedRepository;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn make_temp_dir(prefix: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "cpkg-submodule-{prefix}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn run_git(path: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "git command failed: git -C {:?} {:?}",
+            path,
+            args
+        );
+    }
+
+    fn init_repo(path: &Path) {
+        run_git(path, &["init"]);
+        run_git(path, &["config", "user.email", "cpkg@example.com"]);
+        run_git(path, &["config", "user.name", "cpkg"]);
+    }
 
     #[test]
     fn repository_names_to_remove_keeps_referenced_repositories() {
@@ -245,5 +328,73 @@ mod tests {
         );
 
         assert_eq!(repositories, vec!["MotorDrivers"]);
+    }
+
+    #[test]
+    fn remove_repository_cleans_stale_gitdir_and_allows_readd() {
+        let origin = make_temp_dir("origin");
+        init_repo(&origin);
+        fs::write(origin.join("README.md"), "test").unwrap();
+        run_git(&origin, &["add", "README.md"]);
+        run_git(
+            &origin,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        );
+        run_git(&origin, &["branch", "-M", "main"]);
+
+        let root = make_temp_dir("root");
+        init_repo(&root);
+        fs::create_dir_all(root.join("Modules")).unwrap();
+
+        let origin_url = origin
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let rel_path = "Modules/TrajectoryControl";
+        let repository = ManagedRepository {
+            name: "TrajectoryControl".to_string(),
+            url: origin_url.clone(),
+            rel_path: rel_path.to_string(),
+        };
+
+        run_git(
+            &root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-b",
+                "main",
+                &origin_url,
+                rel_path,
+            ],
+        );
+
+        let git_dir = submodule_git_dir(&root, rel_path).unwrap();
+        assert!(git_dir.exists());
+
+        remove_repository(&root, "TrajectoryControl").unwrap();
+        assert!(!root.join(rel_path).exists());
+        assert!(!git_dir.exists());
+
+        run_git(
+            &root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-b",
+                "main",
+                &repository.url,
+                rel_path,
+            ],
+        );
+        assert!(root.join(rel_path).exists());
+
+        let _ = fs::remove_dir_all(origin);
+        let _ = fs::remove_dir_all(root);
     }
 }
