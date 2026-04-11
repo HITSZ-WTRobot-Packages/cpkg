@@ -1,7 +1,8 @@
-use crate::Cpkg;
-use crate::scanner::Scanner;
 use std::fs;
 use std::path::Path;
+
+use super::manifest::Cpkg;
+use super::scanner::Scanner;
 
 pub trait Generator {
     /// Generate content (as string) for given `Cpkg`, using provided `Scanner` to discover files.

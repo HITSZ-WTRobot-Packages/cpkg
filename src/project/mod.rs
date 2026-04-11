@@ -1,14 +1,14 @@
+pub mod index;
+pub mod integration;
+pub mod resolver;
+pub mod submodule;
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::info;
-
-use crate::index;
-use crate::integration;
-use crate::resolver;
-use crate::submodule;
 
 pub const CURRENT_FORMAT_VERSION: u32 = 1;
 pub const MANIFEST_FILENAME: &str = "wtrproject.toml";

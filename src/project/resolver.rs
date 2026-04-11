@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 
-use crate::index::{IndexedPackage, PackageIndex};
+use super::index::{IndexedPackage, PackageIndex};
 
 const BUILTIN_TARGETS: &[&str] = &["FreeRTOS", "stm32cubemx"];
 const DEFAULT_REPO_BASE_URL: &str = "https://github.com/HITSZ-WTRobot-Packages";
@@ -160,7 +160,7 @@ pub fn resolve(index: &PackageIndex, requested_packages: &[String]) -> Result<Re
 #[cfg(test)]
 mod tests {
     use super::resolve;
-    use crate::index::{IndexedPackage, PackageIndex};
+    use crate::project::index::{IndexedPackage, PackageIndex};
 
     fn sample_index() -> PackageIndex {
         PackageIndex {

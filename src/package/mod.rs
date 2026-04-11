@@ -1,11 +1,17 @@
+pub mod generator;
+pub mod manifest;
+pub mod scanner;
+
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
 use tracing::info;
 
-use crate::config::{self, CURRENT_FORMAT_VERSION, Cpkg};
-use crate::generator::{CMakeGenerator, Generator};
-use crate::scanner::DefaultFsScanner;
+pub use self::generator::{CMakeGenerator, Generator};
+pub use self::manifest::Cpkg;
+pub use self::scanner::{DefaultFsScanner, Scanner};
+
+use self::manifest::CURRENT_FORMAT_VERSION;
 
 fn default_package_manifest(pkgname: &str, dependencies: Vec<String>) -> Cpkg {
     Cpkg {
@@ -26,7 +32,7 @@ pub fn create(root: &Path, package_name: &str) -> Result<()> {
     fs::create_dir_all(path.join("src")).context("failed to create src folder")?;
 
     let manifest = default_package_manifest(package_name, Vec::new());
-    config::save(&path.join("cpkg.toml"), &manifest)?;
+    manifest::save(&path.join("cpkg.toml"), &manifest)?;
 
     info!(
         "Package '{}' created with include/ and src/ folders",
@@ -40,7 +46,7 @@ pub fn init(root: &Path, pkgname: &str, force: bool, deps: &[String]) -> Result<
     let cmake_path = root.join("CMakeLists.txt");
 
     let cpkg = if cpkg_path.exists() {
-        config::load_or_migrate_default(&cpkg_path)?
+        manifest::load_or_migrate_default(&cpkg_path)?
     } else {
         default_package_manifest(pkgname, deps.to_vec())
     };
@@ -49,7 +55,7 @@ pub fn init(root: &Path, pkgname: &str, force: bool, deps: &[String]) -> Result<
         anyhow::bail!("CMakeLists.txt already exists (use -f to overwrite)");
     }
 
-    config::save(&cpkg_path, &cpkg)?;
+    manifest::save(&cpkg_path, &cpkg)?;
     info!("cpkg.toml generated/migrated for {}", cpkg.pkgname);
 
     let scanner = DefaultFsScanner;
@@ -66,7 +72,7 @@ pub fn generate(root: &Path) -> Result<()> {
         anyhow::bail!("cpkg.toml not found");
     }
 
-    let cpkg = config::load_or_migrate_default(&cpkg_path)?;
+    let cpkg = manifest::load_or_migrate_default(&cpkg_path)?;
     let scanner = DefaultFsScanner;
     let generator = CMakeGenerator::default();
     generator

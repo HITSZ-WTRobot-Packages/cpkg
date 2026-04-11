@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::resolver::ResolvedProject;
+use super::resolver::ResolvedProject;
 
 pub const GENERATED_CMAKE_PATH: &str = "cmake/wtr_modules.cmake";
 
@@ -98,7 +98,7 @@ pub fn write_integration_file(root: &Path, resolved: &ResolvedProject) -> Result
 #[cfg(test)]
 mod tests {
     use super::generate_string;
-    use crate::resolver::{ManagedRepository, ResolvedPackage, ResolvedProject};
+    use crate::project::resolver::{ManagedRepository, ResolvedPackage, ResolvedProject};
 
     #[test]
     fn generate_string_emits_repositories_and_targets() {

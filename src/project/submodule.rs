@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Command;
 use tracing::info;
 
-use crate::resolver::ManagedRepository;
+use super::resolver::ManagedRepository;
 
 fn run_git(root: &Path, args: &[&str], description: &str) -> Result<String> {
     let output = Command::new("git")

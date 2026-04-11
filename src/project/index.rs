@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::{info, warn};
 
-use crate::project::{IndexSection, WtrProject};
+use super::{IndexSection, WtrProject};
 
 pub const DEFAULT_INDEX_URL: &str =
     "https://raw.githubusercontent.com/HITSZ-WTRobot-Packages/.github/main/cpkg_index.json";
@@ -154,10 +154,11 @@ pub fn load_for_project(root: &Path, manifest: &WtrProject) -> Result<PackageInd
 #[cfg(test)]
 mod tests {
     use super::load_for_project;
-    use crate::project::{DependencySection, IndexSection, ProjectSection, WtrProject};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::project::{DependencySection, IndexSection, ProjectSection, WtrProject};
 
     fn make_temp_dir(prefix: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
