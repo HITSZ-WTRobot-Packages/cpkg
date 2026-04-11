@@ -10,6 +10,10 @@ pub trait Scanner {
 #[derive(Default)]
 pub struct DefaultFsScanner;
 
+fn normalize_path(path: &Path) -> Option<String> {
+    path.to_str().map(|value| value.replace('\\', "/"))
+}
+
 impl Scanner for DefaultFsScanner {
     fn scan_sources(&self, dir: &Path) -> Vec<String> {
         fn rec(dir: &Path, files: &mut Vec<String>) {
@@ -25,7 +29,7 @@ impl Scanner for DefaultFsScanner {
                         rec(&path, files);
                     } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                         if ext == "c" || ext == "cpp" {
-                            if let Some(s) = path.to_str() {
+                            if let Some(s) = normalize_path(&path) {
                                 files.push(format!("\"{}\"", s));
                             }
                         }
@@ -53,12 +57,9 @@ impl Scanner for DefaultFsScanner {
                         rec(&path, dirs);
                     } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                         if ext == "h" || ext == "hpp" {
-                            let dir_str = path
-                                .parent()
-                                .unwrap_or(Path::new("."))
-                                .to_str()
-                                .unwrap_or(".");
-                            dirs.insert(dir_str.replace("\\", "/"));
+                            let dir_str = normalize_path(path.parent().unwrap_or(Path::new(".")))
+                                .unwrap_or_else(|| ".".to_string());
+                            dirs.insert(dir_str);
                         }
                     }
                 }
@@ -68,5 +69,23 @@ impl Scanner for DefaultFsScanner {
         let mut vec_dirs: Vec<String> = dirs.into_iter().collect();
         vec_dirs.sort();
         vec_dirs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_path;
+    use std::path::Path;
+
+    #[test]
+    fn normalize_path_uses_forward_slashes() {
+        assert_eq!(
+            normalize_path(Path::new(r"src\drivers\motor.cpp")).unwrap(),
+            "src/drivers/motor.cpp"
+        );
+        assert_eq!(
+            normalize_path(Path::new(r"include\drivers")).unwrap(),
+            "include/drivers"
+        );
     }
 }

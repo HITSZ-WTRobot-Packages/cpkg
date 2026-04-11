@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -47,9 +48,43 @@ fn resolve_path(root: &Path, value: &str) -> PathBuf {
 }
 
 fn home_dir() -> Result<PathBuf> {
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow::anyhow!("failed to resolve HOME directory"))
+    home_dir_from_env(
+        env::var_os("HOME"),
+        env::var_os("USERPROFILE"),
+        env::var_os("HOMEDRIVE"),
+        env::var_os("HOMEPATH"),
+    )
+    .ok_or_else(|| anyhow::anyhow!("failed to resolve user home directory"))
+}
+
+fn home_dir_from_env(
+    home: Option<OsString>,
+    userprofile: Option<OsString>,
+    homedrive: Option<OsString>,
+    homepath: Option<OsString>,
+) -> Option<PathBuf> {
+    if let Some(home) = home {
+        if !home.is_empty() {
+            return Some(PathBuf::from(home));
+        }
+    }
+
+    if let Some(userprofile) = userprofile {
+        if !userprofile.is_empty() {
+            return Some(PathBuf::from(userprofile));
+        }
+    }
+
+    match (homedrive, homepath) {
+        (Some(homedrive), Some(homepath)) if !homedrive.is_empty() && !homepath.is_empty() => {
+            Some(PathBuf::from(format!(
+                "{}{}",
+                homedrive.to_string_lossy(),
+                homepath.to_string_lossy()
+            )))
+        }
+        _ => None,
+    }
 }
 
 fn default_cache_path() -> Result<PathBuf> {
@@ -96,6 +131,67 @@ pub fn load_from_path(path: &Path) -> Result<PackageIndex> {
     Ok(index)
 }
 
+fn run_curl_download(url: &str, target: &Path) -> Result<()> {
+    let output = Command::new("curl")
+        .arg("-fsSL")
+        .arg("-o")
+        .arg(target)
+        .arg(url)
+        .output()
+        .context("failed to execute curl for package index download")?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    anyhow::bail!(
+        "curl failed: {}",
+        if stderr.is_empty() {
+            "unknown curl error".to_string()
+        } else {
+            stderr
+        }
+    );
+}
+
+#[cfg(windows)]
+fn power_shell_literal(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+#[cfg(windows)]
+fn run_powershell_download(program: &str, url: &str, target: &Path) -> Result<()> {
+    let url = power_shell_literal(url);
+    let target = power_shell_literal(&target.to_string_lossy());
+    let command = format!("Invoke-WebRequest -Uri '{url}' -OutFile '{target}'");
+    let output = Command::new(program)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &command,
+        ])
+        .output()
+        .with_context(|| format!("failed to execute {program} for package index download"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    anyhow::bail!(
+        "{program} failed: {}",
+        if stderr.is_empty() {
+            "unknown PowerShell error".to_string()
+        } else {
+            stderr
+        }
+    );
+}
+
 fn download_index(url: &str, cache_path: &Path) -> Result<()> {
     let parent = cache_path
         .parent()
@@ -103,25 +199,41 @@ fn download_index(url: &str, cache_path: &Path) -> Result<()> {
     fs::create_dir_all(parent).context("failed to create index cache directory")?;
 
     let temp_path = cache_path.with_extension("download");
-    let output = Command::new("curl")
-        .arg("-fsSL")
-        .arg("-o")
-        .arg(&temp_path)
-        .arg(url)
-        .output()
-        .context("failed to execute curl for package index download")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        anyhow::bail!(
-            "failed to download package index from '{}': {}",
-            url,
-            if stderr.is_empty() {
-                "curl exited with an error".to_string()
-            } else {
-                stderr
+    let mut download_errors = Vec::new();
+    if let Err(error) = run_curl_download(url, &temp_path) {
+        download_errors.push(error.to_string());
+
+        #[cfg(windows)]
+        {
+            let mut downloaded = false;
+            for program in ["powershell", "pwsh"] {
+                match run_powershell_download(program, url, &temp_path) {
+                    Ok(()) => {
+                        downloaded = true;
+                        break;
+                    }
+                    Err(error) => download_errors.push(error.to_string()),
+                }
             }
-        );
+
+            if !downloaded {
+                anyhow::bail!(
+                    "failed to download package index from '{}': {}",
+                    url,
+                    download_errors.join(" | ")
+                );
+            }
+        }
+
+        #[cfg(not(windows))]
+        {
+            anyhow::bail!(
+                "failed to download package index from '{}': {}",
+                url,
+                download_errors.join(" | ")
+            );
+        }
     }
 
     fs::rename(&temp_path, cache_path).context("failed to update cached package index")?;
@@ -153,7 +265,8 @@ pub fn load_for_project(root: &Path, manifest: &WtrProject) -> Result<PackageInd
 
 #[cfg(test)]
 mod tests {
-    use super::load_for_project;
+    use super::{home_dir_from_env, load_for_project};
+    use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -195,5 +308,41 @@ mod tests {
         let index = load_for_project(&dir, &manifest).unwrap();
         assert!(index.packages.is_empty());
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn home_dir_prefers_home_then_userprofile_then_home_drive_pair() {
+        assert_eq!(
+            home_dir_from_env(
+                Some(OsString::from("/home/test")),
+                Some(OsString::from("C:\\Users\\test")),
+                Some(OsString::from("C:")),
+                Some(OsString::from("\\Users\\fallback")),
+            )
+            .unwrap(),
+            PathBuf::from("/home/test")
+        );
+
+        assert_eq!(
+            home_dir_from_env(
+                None,
+                Some(OsString::from("C:\\Users\\test")),
+                Some(OsString::from("D:")),
+                Some(OsString::from("\\Users\\fallback")),
+            )
+            .unwrap(),
+            PathBuf::from("C:\\Users\\test")
+        );
+
+        assert_eq!(
+            home_dir_from_env(
+                None,
+                None,
+                Some(OsString::from("D:")),
+                Some(OsString::from("\\Users\\fallback")),
+            )
+            .unwrap(),
+            PathBuf::from("D:\\Users\\fallback")
+        );
     }
 }
