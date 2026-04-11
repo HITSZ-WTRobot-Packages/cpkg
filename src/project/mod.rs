@@ -85,6 +85,46 @@ fn format_package_list(packages: &[String]) -> String {
     }
 }
 
+fn init_guidance_lines(manifest: &WtrProject) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push("Next steps to integrate cpkg into your CMake project:".to_string());
+
+    if manifest.dependencies.packages.is_empty() {
+        lines.push("1. Add direct dependencies with `cpkg add <PACKAGE>`.".to_string());
+        lines.push(format!(
+            "2. Run `cpkg sync` to generate `{}`.",
+            integration::GENERATED_CMAKE_PATH
+        ));
+        lines.push(
+            "3. Add `include(cmake/wtr_modules.cmake)` to the root `CMakeLists.txt`.".to_string(),
+        );
+        lines.push(
+            "4. Use `wtr_link_packages(<target>)` for plain linking, or `wtr_link_packages_public(<target>)` for `PUBLIC` linking.".to_string(),
+        );
+    } else {
+        lines.push(format!(
+            "1. Run `cpkg sync` to generate `{}`.",
+            integration::GENERATED_CMAKE_PATH
+        ));
+        lines.push(
+            "2. Add `include(cmake/wtr_modules.cmake)` to the root `CMakeLists.txt`.".to_string(),
+        );
+        lines.push(
+            "3. Use `wtr_link_packages(<target>)` for plain linking, or `wtr_link_packages_public(<target>)` for `PUBLIC` linking.".to_string(),
+        );
+    }
+
+    lines
+}
+
+pub fn write_init_integration_guidance(manifest: &WtrProject) -> Result<()> {
+    let term = Term::stderr();
+    for line in init_guidance_lines(manifest) {
+        term.write_line(&line)?;
+    }
+    Ok(())
+}
+
 fn write_add_interactive_summary(previous: &[String], next: &[String]) -> Result<()> {
     let summary = dependency_edit_summary(previous, next);
     let term = Term::stderr();
@@ -162,15 +202,15 @@ pub fn add_and_sync(root: &Path, packages: &[String], options: SyncOptions) -> R
     add_then_sync(root, packages, options)
 }
 
-pub fn init_interactive(root: &Path, options: ProjectInitOptions) -> Result<WtrProject> {
+pub fn init_interactive(root: &Path, options: ProjectInitOptions) -> Result<Option<WtrProject>> {
     let mut manifest = manifest::prepare_init(root, &options)?;
     let index = index::load_for_project(root, &manifest)?;
     match interactive::select_dependencies(&index)? {
-        None => Ok(manifest),
+        None => Ok(None),
         Some(packages) => {
             manifest.dependencies.packages = packages;
             save(root, &manifest)?;
-            Ok(manifest)
+            Ok(Some(manifest))
         }
     }
 }
@@ -199,7 +239,9 @@ pub fn add_interactive(
 
 #[cfg(test)]
 mod tests {
-    use super::{dependency_edit_summary, merge_requested_packages};
+    use super::{dependency_edit_summary, init_guidance_lines, merge_requested_packages};
+    use crate::project::manifest::CURRENT_FORMAT_VERSION;
+    use crate::project::{DependencySection, IndexSection, ProjectSection, WtrProject};
 
     #[test]
     fn merge_requested_packages_preserves_order_and_deduplicates() {
@@ -218,6 +260,43 @@ mod tests {
             merged,
             vec!["MotorDrivers::DJI", "bsp::CANDriver", "services::Watchdog"]
         );
+    }
+
+    #[test]
+    fn init_guidance_mentions_add_before_sync_when_dependencies_are_empty() {
+        let lines = init_guidance_lines(&WtrProject {
+            format_version: CURRENT_FORMAT_VERSION,
+            project: ProjectSection {
+                name: "demo".to_string(),
+                ioc_file: "demo.ioc".to_string(),
+            },
+            dependencies: DependencySection::default(),
+            index: IndexSection::default(),
+        });
+
+        assert!(lines.iter().any(|line| line.contains("cpkg add <PACKAGE>")));
+        assert!(lines.iter().any(|line| {
+            line.contains("wtr_link_packages(<target>)")
+                && line.contains("wtr_link_packages_public(<target>)")
+        }));
+    }
+
+    #[test]
+    fn init_guidance_skips_add_hint_when_dependencies_are_present() {
+        let lines = init_guidance_lines(&WtrProject {
+            format_version: CURRENT_FORMAT_VERSION,
+            project: ProjectSection {
+                name: "demo".to_string(),
+                ioc_file: "demo.ioc".to_string(),
+            },
+            dependencies: DependencySection {
+                packages: vec!["MotorDrivers::DJI".to_string()],
+            },
+            index: IndexSection::default(),
+        });
+
+        assert!(!lines.iter().any(|line| line.contains("cpkg add <PACKAGE>")));
+        assert!(lines.iter().any(|line| line.contains("cpkg sync")));
     }
 
     #[test]

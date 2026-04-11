@@ -6,7 +6,8 @@ use tracing_subscriber;
 use cpkg::{
     ProjectInitOptions, SubmoduleProtocol, SyncOptions, add_packages_and_sync,
     add_packages_interactive, create_package, generate_package, init_package, init_project,
-    init_project_interactive, remove_packages, sync_project,
+    init_project_interactive, project::write_init_integration_guidance, remove_packages,
+    sync_project,
 };
 
 #[derive(Parser)]
@@ -56,7 +57,9 @@ enum Commands {
     after_help = "Examples:\n  \
 cpkg init --ioc MyBoard.ioc\n  \
 cpkg init --name hero_chassis --ioc Hero.ioc\n  \
-cpkg init -I"
+cpkg init -I\n\n\
+After `cpkg sync`, include `cmake/wtr_modules.cmake` from the root `CMakeLists.txt`, \
+then call `wtr_link_packages(<target>)` or `wtr_link_packages_public(<target>)`."
 )]
 struct ProjectInitArgs {
     /// Overwrite an existing `wtrproject.toml`.
@@ -111,7 +114,9 @@ struct RemoveArgs {
     about = "Synchronize `Modules/` submodules and regenerate CMake integration",
     after_help = "Examples:\n  \
 cpkg sync\n  \
-cpkg sync --submodule-protocol https"
+cpkg sync --submodule-protocol https\n\n\
+This command generates `cmake/wtr_modules.cmake`; include it from the root `CMakeLists.txt` \
+and call `wtr_link_packages(<target>)` or `wtr_link_packages_public(<target>)`."
 )]
 struct SyncArgs {
     #[command(flatten)]
@@ -185,10 +190,13 @@ fn main() -> Result<()> {
                 name: args.name,
                 ioc: args.ioc,
             };
-            if args.interactive {
-                init_project_interactive(cwd, options)?;
+            let manifest = if args.interactive {
+                init_project_interactive(cwd, options)?
             } else {
-                init_project(cwd, options)?;
+                Some(init_project(cwd, options)?)
+            };
+            if let Some(manifest) = manifest {
+                write_init_integration_guidance(&manifest)?;
             }
         }
         Commands::Add(args) => {
