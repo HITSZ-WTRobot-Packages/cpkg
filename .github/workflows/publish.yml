@@ -21,22 +21,14 @@ jobs:
             runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: cpkg-linux-x86_64
-          - name: Windows (GNU)
+          - name: Windows (MSVC)
             runner: windows-latest
-            target: x86_64-pc-windows-gnu
-            artifact_name: cpkg-windows-x86_64
+            target: x86_64-pc-windows-msvc
+            artifact_name: cpkg-windows-x86_64-msvc
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
-
-      - name: Setup MinGW
-        if: runner.os == 'Windows'
-        uses: msys2/setup-msys2@v2
-        with:
-          update: true
-          msystem: MINGW64
-          install: mingw-w64-x86_64-gcc
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -47,13 +39,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
-        if: runner.os != 'Windows'
-        run: cargo build --release --locked --target ${{ matrix.platform.target }}
-
-      - name: Build release binary
-        if: runner.os == 'Windows'
-        env:
-          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: gcc
         run: cargo build --release --locked --target ${{ matrix.platform.target }}
 
       - name: Package Linux archive
@@ -72,7 +57,7 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}"
-          $packageDir = "dist/cpkg-$version-x86_64-pc-windows-gnu"
+          $packageDir = "dist/cpkg-$version-x86_64-pc-windows-msvc"
           New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
           Copy-Item "target/${{ matrix.platform.target }}/release/cpkg.exe" "$packageDir/cpkg.exe" -Force
           Copy-Item "README.md" "$packageDir/README.md" -Force

@@ -90,7 +90,8 @@ The codebase must remain compatible with Linux and Windows.
 - Avoid Unix-only shell or path assumptions in Rust code.
 - Normalize generated/discovered paths where needed so tests pass on both platforms.
 - Prefer standard-library filesystem/process APIs over shell-specific behavior.
-- Do not spend effort on MSVC compatibility; if Windows toolchain validation is needed, target GNU.
+- Local development should not depend on MSVC-specific tooling.
+- CI may use the default Windows toolchain provided by GitHub-hosted runners when validating Windows builds.
 
 ## Testing Guidelines
 Place unit tests next to the code they validate using `#[cfg(test)] mod tests`.
