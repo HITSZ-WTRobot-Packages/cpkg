@@ -6,7 +6,7 @@ pub mod network;
 pub mod resolver;
 pub mod submodule;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use console::Term;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -150,19 +150,88 @@ fn write_add_interactive_summary(previous: &[String], next: &[String]) -> Result
     Ok(())
 }
 
-fn update_manifest_then<Update, FollowUp>(
+fn is_dependency_validation_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let message = cause.to_string();
+        message.contains("not found in index") || message.contains("dependency cycle detected")
+    })
+}
+
+fn resolve_project(
+    manifest: &WtrProject,
+    index: &index::PackageIndex,
+    options: SyncOptions,
+) -> Result<resolver::ResolvedProject> {
+    resolver::resolve(
+        index,
+        &manifest.dependencies.packages,
+        options.submodule_protocol,
+    )
+}
+
+fn resolved_project_from_index(
+    manifest: &WtrProject,
+    index: &index::PackageIndex,
+    options: SyncOptions,
+) -> Result<resolver::ResolvedProject> {
+    if manifest.dependencies.packages.is_empty() {
+        return Ok(resolver::ResolvedProject {
+            direct_targets: Vec::new(),
+            external_targets: Vec::new(),
+            managed_packages: Vec::new(),
+            repositories: Vec::new(),
+        });
+    }
+
+    resolve_project(manifest, index, options)
+}
+
+fn finish_sync(
+    root: &Path,
+    manifest: &WtrProject,
+    resolved: &resolver::ResolvedProject,
+) -> Result<SyncSummary> {
+    validate_stm32_project(root, manifest)?;
+    submodule::sync_repositories(root, &resolved.repositories)?;
+    let integration_file = integration::write_integration_file(root, resolved)?;
+
+    let summary = SyncSummary {
+        managed_repo_count: resolved.repositories.len(),
+        resolved_package_count: resolved.managed_packages.len(),
+        direct_dependency_count: manifest.dependencies.packages.len(),
+        integration_file,
+    };
+
+    info!(
+        "sync finished: {} direct package(s), {} resolved package(s), {} repo(s)",
+        summary.direct_dependency_count, summary.resolved_package_count, summary.managed_repo_count
+    );
+    Ok(summary)
+}
+
+fn update_manifest_then<Update, FollowUp, ShouldRestore>(
     root: &Path,
     update: Update,
     follow_up: FollowUp,
+    should_restore: ShouldRestore,
 ) -> Result<WtrProject>
 where
     Update: FnOnce(&mut WtrProject),
-    FollowUp: FnOnce() -> Result<()>,
+    FollowUp: FnOnce(&WtrProject) -> Result<()>,
+    ShouldRestore: Fn(&anyhow::Error) -> bool,
 {
-    let mut manifest = load(root)?;
-    update(&mut manifest);
-    save(root, &manifest)?;
-    follow_up()?;
+    let previous_manifest = load(root)?;
+    let mut updated_manifest = previous_manifest.clone();
+    update(&mut updated_manifest);
+    save(root, &updated_manifest)?;
+    if let Err(error) = follow_up(&updated_manifest) {
+        if should_restore(&error) {
+            save(root, &previous_manifest).context(
+                "failed to restore previous wtrproject.toml after package validation failed",
+            )?;
+        }
+        return Err(error);
+    }
     load(root)
 }
 
@@ -179,20 +248,29 @@ fn add_then_sync(root: &Path, packages: &[String], options: SyncOptions) -> Resu
                 .packages
                 .extend(packages.iter().cloned());
         },
-        || sync(root, options).map(|_| ()),
+        |manifest| {
+            let index = index::load_for_project(root, manifest)?;
+            let resolved = resolve_project(manifest, &index, options)?;
+            finish_sync(root, manifest, &resolved).map(|_| ())
+        },
+        is_dependency_validation_error,
     )
 }
 
-fn replace_dependencies_then_sync(
+fn apply_interactive_selection(
     root: &Path,
-    packages: &[String],
+    manifest: &WtrProject,
+    selected_packages: &[String],
+    index: &index::PackageIndex,
     options: SyncOptions,
-) -> Result<WtrProject> {
-    update_manifest_then(
-        root,
-        |manifest| manifest.dependencies.packages = packages.to_vec(),
-        || sync(root, options).map(|_| ()),
-    )
+) -> Result<(WtrProject, DependencyEditSummary)> {
+    let summary = dependency_edit_summary(&manifest.dependencies.packages, selected_packages);
+    let mut updated_manifest = manifest.clone();
+    updated_manifest.dependencies.packages = selected_packages.to_vec();
+    let resolved = resolved_project_from_index(&updated_manifest, index, options)?;
+    save(root, &updated_manifest)?;
+    finish_sync(root, &updated_manifest, &resolved)?;
+    Ok((load(root)?, summary))
 }
 
 pub fn sync(root: &Path, options: SyncOptions) -> Result<SyncSummary> {
@@ -200,26 +278,8 @@ pub fn sync(root: &Path, options: SyncOptions) -> Result<SyncSummary> {
     validate_stm32_project(root, &manifest)?;
 
     let index = index::load_for_project(root, &manifest)?;
-    let resolved = resolver::resolve(
-        &index,
-        &manifest.dependencies.packages,
-        options.submodule_protocol,
-    )?;
-    submodule::sync_repositories(root, &resolved.repositories)?;
-    let integration_file = integration::write_integration_file(root, &resolved)?;
-
-    let summary = SyncSummary {
-        managed_repo_count: resolved.repositories.len(),
-        resolved_package_count: resolved.managed_packages.len(),
-        direct_dependency_count: manifest.dependencies.packages.len(),
-        integration_file,
-    };
-
-    info!(
-        "sync finished: {} direct package(s), {} resolved package(s), {} repo(s)",
-        summary.direct_dependency_count, summary.resolved_package_count, summary.managed_repo_count
-    );
-    Ok(summary)
+    let resolved = resolve_project(&manifest, &index, options)?;
+    finish_sync(root, &manifest, &resolved)
 }
 
 pub fn add_and_sync(root: &Path, packages: &[String], options: SyncOptions) -> Result<WtrProject> {
@@ -256,7 +316,8 @@ pub fn add_interactive(
         Some(packages) => packages,
         None => return Ok(manifest),
     };
-    let updated_manifest = replace_dependencies_then_sync(root, &interactive_packages, options)?;
+    let (updated_manifest, _) =
+        apply_interactive_selection(root, &manifest, &interactive_packages, &index, options)?;
     write_add_interactive_summary(&previous_packages, &interactive_packages)?;
     Ok(updated_manifest)
 }
@@ -264,8 +325,8 @@ pub fn add_interactive(
 #[cfg(test)]
 mod tests {
     use super::{
-        dependency_edit_summary, init_guidance_lines, merge_requested_packages,
-        update_manifest_then,
+        dependency_edit_summary, init_guidance_lines, is_dependency_validation_error,
+        merge_requested_packages, update_manifest_then,
     };
     use crate::project::manifest::CURRENT_FORMAT_VERSION;
     use crate::project::{
@@ -362,7 +423,8 @@ mod tests {
         let error = update_manifest_then(
             &dir,
             |manifest| manifest.dependencies.packages = vec!["MotorDrivers::DJI".to_string()],
-            || Err(anyhow::anyhow!("simulated network failure")),
+            |_| Err(anyhow::anyhow!("simulated network failure")),
+            is_dependency_validation_error,
         )
         .unwrap_err();
 
@@ -372,6 +434,51 @@ mod tests {
         assert_eq!(manifest.dependencies.packages, vec!["MotorDrivers::DJI"]);
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn update_manifest_then_restores_previous_manifest_after_validation_failure() {
+        let dir = make_temp_dir("restore-after-validation");
+        fs::write(dir.join("robot.ioc"), "").unwrap();
+
+        init(
+            &dir,
+            ProjectInitOptions {
+                force: false,
+                name: Some("robot".to_string()),
+                ioc: None,
+            },
+        )
+        .unwrap();
+
+        let error = update_manifest_then(
+            &dir,
+            |manifest| manifest.dependencies.packages = vec!["invalid::Package".to_string()],
+            |_| {
+                Err(anyhow::anyhow!(
+                    "package 'invalid::Package' not found in index"
+                ))
+            },
+            is_dependency_validation_error,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not found in index"));
+
+        let manifest = load(&dir).unwrap();
+        assert!(manifest.dependencies.packages.is_empty());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dependency_validation_error_detects_not_found_messages() {
+        assert!(is_dependency_validation_error(&anyhow::anyhow!(
+            "package 'invalid::Package' not found in index"
+        )));
+        assert!(!is_dependency_validation_error(&anyhow::anyhow!(
+            "simulated network failure"
+        )));
     }
 
     #[test]
