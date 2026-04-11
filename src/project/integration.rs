@@ -106,6 +106,37 @@ endforeach()
     content
 }
 
+pub fn read_managed_repositories(root: &Path) -> Result<Vec<String>> {
+    let path = root.join(GENERATED_CMAKE_PATH);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let content = fs::read_to_string(&path).context("failed to read generated CMake file")?;
+    let mut lines = content.lines();
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim();
+        if trimmed == "set(WTR_MANAGED_REPOSITORIES)" {
+            return Ok(Vec::new());
+        }
+        if trimmed == "set(WTR_MANAGED_REPOSITORIES" {
+            let mut repositories = Vec::new();
+            for line in &mut lines {
+                let trimmed = line.trim();
+                if trimmed == ")" {
+                    break;
+                }
+                if !trimmed.is_empty() {
+                    repositories.push(trimmed.to_string());
+                }
+            }
+            return Ok(repositories);
+        }
+    }
+
+    Ok(Vec::new())
+}
+
 pub fn write_integration_file(root: &Path, resolved: &ResolvedProject) -> Result<PathBuf> {
     let path = root.join(GENERATED_CMAKE_PATH);
     let parent = path
@@ -118,8 +149,24 @@ pub fn write_integration_file(root: &Path, resolved: &ResolvedProject) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::generate_string;
+    use super::{generate_string, read_managed_repositories, write_integration_file};
     use crate::project::resolver::{ManagedRepository, ResolvedPackage, ResolvedProject};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn make_temp_dir(prefix: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "cpkg-{prefix}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
 
     #[test]
     fn generate_string_emits_repositories_and_targets() {
@@ -166,5 +213,31 @@ mod tests {
             content
                 .contains("target_link_libraries(${target} PUBLIC ${WTR_DIRECT_PACKAGE_TARGETS})")
         );
+    }
+
+    #[test]
+    fn read_managed_repositories_parses_generated_file() {
+        let dir = make_temp_dir("integration-read-repos");
+        let resolved = ResolvedProject {
+            direct_targets: vec!["MotorDrivers::DJI".to_string()],
+            external_targets: vec![],
+            managed_packages: vec![ResolvedPackage {
+                pkgname: "MotorDrivers::DJI".to_string(),
+                repo: "MotorDrivers".to_string(),
+                path: "Modules/MotorDrivers/motors/DJI".to_string(),
+                dependencies: vec![],
+            }],
+            repositories: vec![ManagedRepository {
+                name: "MotorDrivers".to_string(),
+                url: "git@github.com:HITSZ-WTRobot-Packages/MotorDrivers.git".to_string(),
+                rel_path: "Modules/MotorDrivers".to_string(),
+            }],
+        };
+
+        write_integration_file(&dir, &resolved).unwrap();
+        let repositories = read_managed_repositories(&dir).unwrap();
+        assert_eq!(repositories, vec!["MotorDrivers"]);
+
+        let _ = fs::remove_dir_all(dir);
     }
 }

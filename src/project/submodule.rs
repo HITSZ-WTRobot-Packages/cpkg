@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -160,6 +161,44 @@ fn sync_repository(root: &Path, repository: &ManagedRepository) -> Result<()> {
     Ok(())
 }
 
+fn repository_names_to_remove(
+    current_repositories: &[String],
+    desired_repositories: &[ManagedRepository],
+) -> Vec<String> {
+    let desired = desired_repositories
+        .iter()
+        .map(|repository| repository.name.clone())
+        .collect::<BTreeSet<_>>();
+
+    current_repositories
+        .iter()
+        .filter(|repository| !desired.contains(*repository))
+        .cloned()
+        .collect()
+}
+
+fn remove_repository(root: &Path, repository_name: &str) -> Result<()> {
+    let rel_path = format!("Modules/{repository_name}");
+    if !is_registered_submodule(root, &rel_path)? {
+        return Ok(());
+    }
+
+    run_git(
+        root,
+        &["submodule", "deinit", "-f", "--", &rel_path],
+        &format!("deinitializing submodule {repository_name}"),
+        false,
+    )?;
+    run_git(
+        root,
+        &["rm", "-f", "--", &rel_path],
+        &format!("removing submodule {repository_name}"),
+        false,
+    )?;
+    info!("removed submodule {}", repository_name);
+    Ok(())
+}
+
 pub fn sync_repositories(root: &Path, repositories: &[ManagedRepository]) -> Result<()> {
     ensure_git_repository_root(root)?;
     fs::create_dir_all(root.join("Modules")).context("failed to create Modules directory")?;
@@ -169,4 +208,42 @@ pub fn sync_repositories(root: &Path, repositories: &[ManagedRepository]) -> Res
     }
 
     Ok(())
+}
+
+pub fn remove_unused_repositories(
+    root: &Path,
+    current_repositories: &[String],
+    desired_repositories: &[ManagedRepository],
+) -> Result<()> {
+    let repositories_to_remove =
+        repository_names_to_remove(current_repositories, desired_repositories);
+    if repositories_to_remove.is_empty() {
+        return Ok(());
+    }
+
+    ensure_git_repository_root(root)?;
+    for repository_name in repositories_to_remove {
+        remove_repository(root, &repository_name)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::repository_names_to_remove;
+    use crate::project::resolver::ManagedRepository;
+
+    #[test]
+    fn repository_names_to_remove_keeps_referenced_repositories() {
+        let repositories = repository_names_to_remove(
+            &["MotorDrivers".to_string(), "BasicComponents".to_string()],
+            &[ManagedRepository {
+                name: "BasicComponents".to_string(),
+                url: "https://example.com/BasicComponents.git".to_string(),
+                rel_path: "Modules/BasicComponents".to_string(),
+            }],
+        );
+
+        assert_eq!(repositories, vec!["MotorDrivers"]);
+    }
 }

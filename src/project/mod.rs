@@ -200,9 +200,11 @@ fn finish_sync(
     manifest: &WtrProject,
     resolved: &resolver::ResolvedProject,
 ) -> Result<SyncSummary> {
+    let previous_repositories = integration::read_managed_repositories(root)?;
     validate_stm32_project(root, manifest)?;
     submodule::sync_repositories(root, &resolved.repositories)?;
     let integration_file = integration::write_integration_file(root, resolved)?;
+    submodule::remove_unused_repositories(root, &previous_repositories, &resolved.repositories)?;
 
     let summary = SyncSummary {
         managed_repo_count: resolved.repositories.len(),
@@ -223,8 +225,11 @@ fn refresh_project_links(
     manifest: &WtrProject,
     options: SyncOptions,
 ) -> Result<PathBuf> {
+    let previous_repositories = integration::read_managed_repositories(root)?;
     let resolved = resolved_project_for_integration(root, manifest, options)?;
-    integration::write_integration_file(root, &resolved)
+    let path = integration::write_integration_file(root, &resolved)?;
+    submodule::remove_unused_repositories(root, &previous_repositories, &resolved.repositories)?;
+    Ok(path)
 }
 
 fn update_manifest_then<Update, FollowUp, ShouldRestore>(
@@ -393,7 +398,8 @@ mod tests {
         index::PackageIndex, init, load, save,
     };
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn make_temp_dir(prefix: &str) -> PathBuf {
@@ -407,6 +413,11 @@ mod tests {
         ));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    fn init_git_repo(path: &Path) {
+        let status = Command::new("git").arg("init").arg(path).status().unwrap();
+        assert!(status.success());
     }
 
     #[test]
@@ -544,6 +555,7 @@ mod tests {
     #[test]
     fn remove_updates_generated_links_without_syncing_modules() {
         let dir = make_temp_dir("remove-refreshes-links");
+        init_git_repo(&dir);
         fs::write(dir.join("robot.ioc"), "").unwrap();
         fs::write(
             dir.join("cpkg_index.json"),
@@ -659,6 +671,7 @@ mod tests {
     #[test]
     fn add_interactive_removal_only_refreshes_links_without_sync() {
         let dir = make_temp_dir("interactive-removal-only");
+        init_git_repo(&dir);
         fs::write(dir.join("robot.ioc"), "").unwrap();
         fs::write(dir.join("cpkg_index.json"), sample_index_json()).unwrap();
 

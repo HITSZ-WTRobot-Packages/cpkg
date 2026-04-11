@@ -36,6 +36,9 @@ When changing CLI behavior, update the help text in `src/main.rs` and verify the
 - Interactive selection must not write or modify project files until the user confirms the final selection.
 - Once the user confirms a direct-dependency change, write `wtrproject.toml` before any follow-up network-backed work so an interrupted run can be resumed with `cpkg sync`.
 - Network-backed operations should surface live execution status to the user; prefer a temporary, bounded terminal log panel over silent background work.
+- `cpkg add -I` should refresh the package index as soon as the command starts, before rendering the picker, and should reuse that refreshed index for the confirmed selection.
+- When `cpkg add -I` only removes packages and adds no new direct dependency, it should update `wtrproject.toml`, regenerate project links locally, and remove any managed submodule repositories that are no longer required, without fetching or syncing retained submodules.
+- `cpkg remove` should not fetch or synchronize retained submodules; it should update `wtrproject.toml`, locally regenerate the project integration file, and remove any managed submodule repositories that are no longer required.
 - The tree-style picker should support inline fuzzy search/filtering without leaving the interactive view.
 - `cpkg add -I` should behave like editing the current direct dependency set: existing direct dependencies start preselected, and the confirmed selection becomes the new direct dependency list.
 - Preselected or currently selected packages in the interactive picker should have clear visual highlighting beyond the checkbox marker alone.
