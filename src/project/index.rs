@@ -238,9 +238,27 @@ pub fn load_for_project(root: &Path, manifest: &WtrProject) -> Result<PackageInd
     }
 }
 
+pub fn load_for_project_without_refresh(
+    root: &Path,
+    manifest: &WtrProject,
+) -> Result<PackageIndex> {
+    match determine_source(root, &manifest.index)? {
+        IndexSource::Local(path) => load_from_path(&path),
+        IndexSource::Remote { cache_path, .. } => {
+            if !cache_path.exists() {
+                anyhow::bail!(
+                    "no cached package index found at '{}'; run `cpkg sync` or `cpkg add -I` first",
+                    cache_path.to_string_lossy()
+                );
+            }
+            load_from_path(&cache_path)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{home_dir_from_env, load_for_project};
+    use super::{home_dir_from_env, load_for_project, load_for_project_without_refresh};
     use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
@@ -319,5 +337,35 @@ mod tests {
             .unwrap(),
             PathBuf::from("D:\\Users\\fallback")
         );
+    }
+
+    #[test]
+    fn load_for_project_without_refresh_uses_configured_cache() {
+        let dir = make_temp_dir("index-cache-only");
+        let cache_path = dir.join("cache").join("cpkg_index.json");
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &cache_path,
+            r#"{"generated_at":"2026-01-01T00:00:00Z","packages":[]}"#,
+        )
+        .unwrap();
+
+        let manifest = WtrProject {
+            format_version: 1,
+            project: ProjectSection {
+                name: "robot".to_string(),
+                ioc_file: "robot.ioc".to_string(),
+            },
+            dependencies: DependencySection::default(),
+            index: IndexSection {
+                path: None,
+                url: Some("https://example.com/cpkg_index.json".to_string()),
+                cache_path: Some("cache/cpkg_index.json".to_string()),
+            },
+        };
+
+        let index = load_for_project_without_refresh(&dir, &manifest).unwrap();
+        assert!(index.packages.is_empty());
+        let _ = fs::remove_dir_all(dir);
     }
 }

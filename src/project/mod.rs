@@ -14,7 +14,7 @@ use tracing::info;
 
 pub use self::manifest::{
     DependencySection, IndexSection, ProjectInitOptions, ProjectSection, WtrProject, add, init,
-    load, manifest_path, project_ioc_path, remove, save, validate_stm32_project,
+    load, manifest_path, project_ioc_path, save, validate_stm32_project,
 };
 pub use self::resolver::SubmoduleProtocol;
 
@@ -186,6 +186,15 @@ fn resolved_project_from_index(
     resolve_project(manifest, index, options)
 }
 
+fn resolved_project_for_integration(
+    root: &Path,
+    manifest: &WtrProject,
+    options: SyncOptions,
+) -> Result<resolver::ResolvedProject> {
+    let index = index::load_for_project_without_refresh(root, manifest)?;
+    resolved_project_from_index(manifest, &index, options)
+}
+
 fn finish_sync(
     root: &Path,
     manifest: &WtrProject,
@@ -207,6 +216,15 @@ fn finish_sync(
         summary.direct_dependency_count, summary.resolved_package_count, summary.managed_repo_count
     );
     Ok(summary)
+}
+
+fn refresh_project_links(
+    root: &Path,
+    manifest: &WtrProject,
+    options: SyncOptions,
+) -> Result<PathBuf> {
+    let resolved = resolved_project_for_integration(root, manifest, options)?;
+    integration::write_integration_file(root, &resolved)
 }
 
 fn update_manifest_then<Update, FollowUp, ShouldRestore>(
@@ -269,7 +287,13 @@ fn apply_interactive_selection(
     updated_manifest.dependencies.packages = selected_packages.to_vec();
     let resolved = resolved_project_from_index(&updated_manifest, index, options)?;
     save(root, &updated_manifest)?;
-    finish_sync(root, &updated_manifest, &resolved)?;
+
+    if summary.added.is_empty() {
+        refresh_project_links(root, &updated_manifest, options)?;
+    } else {
+        finish_sync(root, &updated_manifest, &resolved)?;
+    }
+
     Ok((load(root)?, summary))
 }
 
@@ -284,6 +308,40 @@ pub fn sync(root: &Path, options: SyncOptions) -> Result<SyncSummary> {
 
 pub fn add_and_sync(root: &Path, packages: &[String], options: SyncOptions) -> Result<WtrProject> {
     add_then_sync(root, packages, options)
+}
+
+pub fn remove(root: &Path, packages: &[String]) -> Result<WtrProject> {
+    if packages.is_empty() {
+        anyhow::bail!("no packages provided");
+    }
+
+    let manifest = load(root)?;
+    let missing = packages
+        .iter()
+        .filter(|package| !manifest.dependencies.packages.contains(package))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "package(s) not found in wtrproject.toml: {}",
+            missing.join(", ")
+        );
+    }
+
+    update_manifest_then(
+        root,
+        |manifest| {
+            manifest
+                .dependencies
+                .packages
+                .retain(|package| !packages.contains(package));
+        },
+        |manifest| {
+            refresh_project_links(root, manifest, SyncOptions::default())?;
+            Ok(())
+        },
+        |_| true,
+    )
 }
 
 pub fn init_interactive(root: &Path, options: ProjectInitOptions) -> Result<Option<WtrProject>> {
@@ -325,12 +383,14 @@ pub fn add_interactive(
 #[cfg(test)]
 mod tests {
     use super::{
-        dependency_edit_summary, init_guidance_lines, is_dependency_validation_error,
-        merge_requested_packages, update_manifest_then,
+        SyncOptions, apply_interactive_selection, dependency_edit_summary, init_guidance_lines,
+        is_dependency_validation_error, merge_requested_packages, refresh_project_links, remove,
+        update_manifest_then,
     };
     use crate::project::manifest::CURRENT_FORMAT_VERSION;
     use crate::project::{
-        DependencySection, IndexSection, ProjectInitOptions, ProjectSection, WtrProject, init, load,
+        DependencySection, IndexSection, ProjectInitOptions, ProjectSection, WtrProject,
+        index::PackageIndex, init, load, save,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -479,6 +539,167 @@ mod tests {
         assert!(!is_dependency_validation_error(&anyhow::anyhow!(
             "simulated network failure"
         )));
+    }
+
+    #[test]
+    fn remove_updates_generated_links_without_syncing_modules() {
+        let dir = make_temp_dir("remove-refreshes-links");
+        fs::write(dir.join("robot.ioc"), "").unwrap();
+        fs::write(
+            dir.join("cpkg_index.json"),
+            r#"{
+  "generated_at":"2026-01-01T00:00:00Z",
+  "packages":[
+    {
+      "repo":"BasicComponents",
+      "path":"Modules/BasicComponents/bsp/can_driver",
+      "name":"CANDriver",
+      "pkgname":"bsp::CANDriver",
+      "version":"0.1.0",
+      "dependencies":["stm32cubemx"]
+    },
+    {
+      "repo":"MotorDrivers",
+      "path":"Modules/MotorDrivers/motors/DJI",
+      "name":"DJI",
+      "pkgname":"MotorDrivers::DJI",
+      "version":"0.1.0",
+      "dependencies":["bsp::CANDriver"]
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        init(
+            &dir,
+            ProjectInitOptions {
+                force: false,
+                name: Some("robot".to_string()),
+                ioc: None,
+            },
+        )
+        .unwrap();
+
+        let mut manifest = load(&dir).unwrap();
+        manifest.dependencies.packages = vec![
+            "MotorDrivers::DJI".to_string(),
+            "bsp::CANDriver".to_string(),
+        ];
+        save(&dir, &manifest).unwrap();
+        let integration_path =
+            refresh_project_links(&dir, &manifest, SyncOptions::default()).unwrap();
+        let before = fs::read_to_string(&integration_path).unwrap();
+        assert!(before.contains("MotorDrivers::DJI"));
+
+        let manifest = remove(&dir, &["MotorDrivers::DJI".to_string()]).unwrap();
+        assert_eq!(manifest.dependencies.packages, vec!["bsp::CANDriver"]);
+
+        let after = fs::read_to_string(&integration_path).unwrap();
+        assert!(after.contains("set(WTR_DIRECT_PACKAGE_TARGETS\n    bsp::CANDriver\n)"));
+        assert!(!after.contains("set(WTR_DIRECT_PACKAGE_TARGETS\n    MotorDrivers::DJI"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn remove_last_package_writes_empty_integration_without_index() {
+        let dir = make_temp_dir("remove-last-package");
+        fs::write(dir.join("robot.ioc"), "").unwrap();
+
+        init(
+            &dir,
+            ProjectInitOptions {
+                force: false,
+                name: Some("robot".to_string()),
+                ioc: None,
+            },
+        )
+        .unwrap();
+
+        let mut manifest = load(&dir).unwrap();
+        manifest.dependencies.packages = vec!["MotorDrivers::DJI".to_string()];
+        save(&dir, &manifest).unwrap();
+
+        let manifest = remove(&dir, &["MotorDrivers::DJI".to_string()]).unwrap();
+        assert!(manifest.dependencies.packages.is_empty());
+
+        let integration = fs::read_to_string(dir.join("cmake/wtr_modules.cmake")).unwrap();
+        assert!(integration.contains("set(WTR_DIRECT_PACKAGE_TARGETS)"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    fn sample_index_json() -> &'static str {
+        r#"{
+  "generated_at":"2026-01-01T00:00:00Z",
+  "packages":[
+    {
+      "repo":"BasicComponents",
+      "path":"Modules/BasicComponents/bsp/can_driver",
+      "name":"CANDriver",
+      "pkgname":"bsp::CANDriver",
+      "version":"0.1.0",
+      "dependencies":["stm32cubemx"]
+    },
+    {
+      "repo":"MotorDrivers",
+      "path":"Modules/MotorDrivers/motors/DJI",
+      "name":"DJI",
+      "pkgname":"MotorDrivers::DJI",
+      "version":"0.1.0",
+      "dependencies":["bsp::CANDriver"]
+    }
+  ]
+}"#
+    }
+
+    fn sample_index() -> PackageIndex {
+        serde_json::from_str(sample_index_json()).unwrap()
+    }
+
+    #[test]
+    fn add_interactive_removal_only_refreshes_links_without_sync() {
+        let dir = make_temp_dir("interactive-removal-only");
+        fs::write(dir.join("robot.ioc"), "").unwrap();
+        fs::write(dir.join("cpkg_index.json"), sample_index_json()).unwrap();
+
+        init(
+            &dir,
+            ProjectInitOptions {
+                force: false,
+                name: Some("robot".to_string()),
+                ioc: None,
+            },
+        )
+        .unwrap();
+
+        let mut manifest = load(&dir).unwrap();
+        manifest.dependencies.packages = vec![
+            "MotorDrivers::DJI".to_string(),
+            "bsp::CANDriver".to_string(),
+        ];
+        save(&dir, &manifest).unwrap();
+        refresh_project_links(&dir, &manifest, SyncOptions::default()).unwrap();
+
+        let (updated_manifest, summary) = apply_interactive_selection(
+            &dir,
+            &manifest,
+            &["bsp::CANDriver".to_string()],
+            &sample_index(),
+            SyncOptions::default(),
+        )
+        .unwrap();
+
+        assert!(summary.added.is_empty());
+        assert_eq!(summary.removed, vec!["MotorDrivers::DJI"]);
+        assert_eq!(
+            updated_manifest.dependencies.packages,
+            vec!["bsp::CANDriver"]
+        );
+
+        let integration = fs::read_to_string(dir.join("cmake/wtr_modules.cmake")).unwrap();
+        assert!(integration.contains("set(WTR_DIRECT_PACKAGE_TARGETS\n    bsp::CANDriver\n)"));
+        assert!(!integration.contains("set(WTR_DIRECT_PACKAGE_TARGETS\n    MotorDrivers::DJI"));
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

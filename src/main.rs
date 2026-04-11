@@ -40,7 +40,7 @@ enum Commands {
     Init(ProjectInitArgs),
     /// Add direct dependencies, or edit them interactively, and synchronize `Modules/`.
     Add(AddArgs),
-    /// Remove direct package dependencies from `wtrproject.toml`.
+    /// Remove direct package dependencies and refresh local project links.
     Remove(RemoveArgs),
     /// Synchronize submodules and regenerate project integration files.
     Sync(SyncArgs),
@@ -98,10 +98,12 @@ struct AddArgs {
 
 #[derive(Args)]
 #[command(
-    about = "Remove direct package dependencies from `wtrproject.toml`",
+    about = "Remove direct package dependencies and refresh local project links",
     after_help = "Examples:\n  \
 cpkg remove MotorDrivers::DJI\n  \
-cpkg remove MotorDrivers::DJI bsp::CANDriver"
+cpkg remove MotorDrivers::DJI bsp::CANDriver\n\n\
+This command updates `wtrproject.toml` and regenerates `cmake/wtr_modules.cmake` locally \
+without synchronizing `Modules/` submodules."
 )]
 struct RemoveArgs {
     /// Direct package names to remove from `wtrproject.toml`.
