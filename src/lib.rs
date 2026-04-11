@@ -7,5 +7,6 @@ pub use package::{
 };
 pub use project::{
     ProjectInitOptions, SubmoduleProtocol, SyncOptions, SyncSummary, WtrProject,
-    add as add_packages, init as init_project, remove as remove_packages, sync as sync_project,
+    add as add_packages, add_interactive as add_packages_interactive, init as init_project,
+    init_interactive as init_project_interactive, remove as remove_packages, sync as sync_project,
 };

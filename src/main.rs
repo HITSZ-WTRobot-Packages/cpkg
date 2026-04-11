@@ -1,11 +1,13 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::io;
 use std::path::Path;
 use tracing_subscriber;
 
 use cpkg::{
-    ProjectInitOptions, SubmoduleProtocol, SyncOptions, add_packages, create_package,
-    generate_package, init_package, init_project, remove_packages, sync_project,
+    ProjectInitOptions, SubmoduleProtocol, SyncOptions, add_packages, add_packages_interactive,
+    create_package, generate_package, init_package, init_project, init_project_interactive,
+    remove_packages, sync_project,
 };
 
 #[derive(Parser)]
@@ -35,6 +37,8 @@ enum Commands {
 struct ProjectInitArgs {
     #[arg(short, long)]
     force: bool,
+    #[arg(short = 'I', long)]
+    interactive: bool,
     #[arg(long)]
     name: Option<String>,
     #[arg(long)]
@@ -43,6 +47,8 @@ struct ProjectInitArgs {
 
 #[derive(Args)]
 struct PackageListArgs {
+    #[arg(short = 'I', long)]
+    interactive: bool,
     packages: Vec<String>,
 }
 
@@ -89,17 +95,32 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Init(args) => {
-            init_project(
-                cwd,
-                ProjectInitOptions {
-                    force: args.force,
-                    name: args.name,
-                    ioc: args.ioc,
-                },
-            )?;
+            let options = ProjectInitOptions {
+                force: args.force,
+                name: args.name,
+                ioc: args.ioc,
+            };
+            if args.interactive {
+                let stdin = io::stdin();
+                let mut input = stdin.lock();
+                let mut output = io::stdout();
+                init_project_interactive(cwd, options, &mut input, &mut output)?;
+            } else {
+                init_project(cwd, options)?;
+            }
         }
         Commands::Add(args) => {
-            add_packages(cwd, &args.packages)?;
+            if args.interactive {
+                let stdin = io::stdin();
+                let mut input = stdin.lock();
+                let mut output = io::stdout();
+                add_packages_interactive(cwd, &mut input, &mut output)?;
+                if !args.packages.is_empty() {
+                    add_packages(cwd, &args.packages)?;
+                }
+            } else {
+                add_packages(cwd, &args.packages)?;
+            }
         }
         Commands::Remove(args) => {
             remove_packages(cwd, &args.packages)?;

@@ -1,10 +1,12 @@
 pub mod index;
 pub mod integration;
+pub mod interactive;
 pub mod manifest;
 pub mod resolver;
 pub mod submodule;
 
 use anyhow::Result;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use tracing::info;
 
@@ -52,4 +54,35 @@ pub fn sync(root: &Path, options: SyncOptions) -> Result<SyncSummary> {
         summary.direct_dependency_count, summary.resolved_package_count, summary.managed_repo_count
     );
     Ok(summary)
+}
+
+pub fn init_interactive<R: BufRead, W: Write>(
+    root: &Path,
+    options: ProjectInitOptions,
+    input: &mut R,
+    output: &mut W,
+) -> Result<WtrProject> {
+    let manifest = init(root, options)?;
+    let index = index::load_for_project(root, &manifest)?;
+    let packages = interactive::select_dependencies(input, output, &index)?;
+    if packages.is_empty() {
+        Ok(manifest)
+    } else {
+        add(root, &packages)
+    }
+}
+
+pub fn add_interactive<R: BufRead, W: Write>(
+    root: &Path,
+    input: &mut R,
+    output: &mut W,
+) -> Result<WtrProject> {
+    let manifest = load(root)?;
+    let index = index::load_for_project(root, &manifest)?;
+    let packages = interactive::select_dependencies(input, output, &index)?;
+    if packages.is_empty() {
+        Ok(manifest)
+    } else {
+        add(root, &packages)
+    }
 }
