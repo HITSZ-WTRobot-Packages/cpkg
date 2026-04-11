@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::info;
@@ -75,6 +76,57 @@ fn normalize_manifest(project: &mut WtrProject) {
     normalize_packages(&mut project.dependencies.packages);
 }
 
+fn toml_string_literal(value: &str) -> String {
+    toml::Value::String(value.to_string()).to_string()
+}
+
+fn write_key_value(content: &mut String, key: &str, value: &str) {
+    let _ = writeln!(content, "{key} = {}", toml_string_literal(value));
+}
+
+fn write_packages(content: &mut String, packages: &[String]) {
+    if packages.is_empty() {
+        content.push_str("packages = []\n");
+        return;
+    }
+
+    content.push_str("packages = [\n");
+    for package in packages {
+        let _ = writeln!(content, "    {},", toml_string_literal(package));
+    }
+    content.push_str("]\n");
+}
+
+fn serialize_manifest(manifest: &WtrProject) -> String {
+    let mut content = String::new();
+    let _ = writeln!(content, "format_version = {}", manifest.format_version);
+    content.push('\n');
+
+    content.push_str("[project]\n");
+    write_key_value(&mut content, "name", &manifest.project.name);
+    write_key_value(&mut content, "ioc_file", &manifest.project.ioc_file);
+    content.push('\n');
+
+    content.push_str("[dependencies]\n");
+    write_packages(&mut content, &manifest.dependencies.packages);
+
+    if !manifest.index.is_empty() {
+        content.push('\n');
+        content.push_str("[index]\n");
+        if let Some(path) = &manifest.index.path {
+            write_key_value(&mut content, "path", path);
+        }
+        if let Some(url) = &manifest.index.url {
+            write_key_value(&mut content, "url", url);
+        }
+        if let Some(cache_path) = &manifest.index.cache_path {
+            write_key_value(&mut content, "cache_path", cache_path);
+        }
+    }
+
+    content
+}
+
 pub fn manifest_path(root: &Path) -> PathBuf {
     root.join(MANIFEST_FILENAME)
 }
@@ -97,7 +149,7 @@ pub fn load(root: &Path) -> Result<WtrProject> {
 pub fn save(root: &Path, manifest: &WtrProject) -> Result<()> {
     let mut normalized = manifest.clone();
     normalize_manifest(&mut normalized);
-    let content = toml::to_string(&normalized).context("failed to serialize wtrproject.toml")?;
+    let content = serialize_manifest(&normalized);
     fs::write(manifest_path(root), content).context("failed to write wtrproject.toml")?;
     Ok(())
 }
@@ -252,7 +304,7 @@ pub fn remove(root: &Path, packages: &[String]) -> Result<WtrProject> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProjectInitOptions, add, init, load, prepare_init, remove};
+    use super::{ProjectInitOptions, add, init, load, prepare_init, remove, serialize_manifest};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -363,5 +415,28 @@ mod tests {
         let manifest = load(&dir).unwrap();
         assert_eq!(manifest.dependencies.packages, vec!["MotorDrivers::DJI"]);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn serialize_manifest_formats_packages_as_multiline_array() {
+        let content = serialize_manifest(&super::WtrProject {
+            format_version: super::CURRENT_FORMAT_VERSION,
+            project: super::ProjectSection {
+                name: "robot".to_string(),
+                ioc_file: "robot.ioc".to_string(),
+            },
+            dependencies: super::DependencySection {
+                packages: vec![
+                    "MotorDrivers::DJI".to_string(),
+                    "bsp::CANDriver".to_string(),
+                ],
+            },
+            index: super::IndexSection::default(),
+        });
+
+        assert!(content.contains("[dependencies]\npackages = [\n"));
+        assert!(content.contains("    \"MotorDrivers::DJI\",\n"));
+        assert!(content.contains("    \"bsp::CANDriver\",\n"));
+        assert!(content.contains("]\n"));
     }
 }
