@@ -29,6 +29,29 @@ pub struct SyncOptions {
     pub submodule_protocol: SubmoduleProtocol,
 }
 
+fn merge_requested_packages(
+    interactive_packages: &[String],
+    explicit_packages: &[String],
+) -> Vec<String> {
+    let mut merged = Vec::new();
+    for package in interactive_packages.iter().chain(explicit_packages.iter()) {
+        if !merged.contains(package) {
+            merged.push(package.clone());
+        }
+    }
+    merged
+}
+
+fn add_then_sync(root: &Path, packages: &[String], options: SyncOptions) -> Result<WtrProject> {
+    if packages.is_empty() {
+        return load(root);
+    }
+
+    add(root, packages)?;
+    sync(root, options)?;
+    load(root)
+}
+
 pub fn sync(root: &Path, options: SyncOptions) -> Result<SyncSummary> {
     let manifest = load(root)?;
     validate_stm32_project(root, &manifest)?;
@@ -56,6 +79,10 @@ pub fn sync(root: &Path, options: SyncOptions) -> Result<SyncSummary> {
     Ok(summary)
 }
 
+pub fn add_and_sync(root: &Path, packages: &[String], options: SyncOptions) -> Result<WtrProject> {
+    add_then_sync(root, packages, options)
+}
+
 pub fn init_interactive<R: BufRead, W: Write>(
     root: &Path,
     options: ProjectInitOptions,
@@ -74,15 +101,38 @@ pub fn init_interactive<R: BufRead, W: Write>(
 
 pub fn add_interactive<R: BufRead, W: Write>(
     root: &Path,
+    explicit_packages: &[String],
+    options: SyncOptions,
     input: &mut R,
     output: &mut W,
 ) -> Result<WtrProject> {
     let manifest = load(root)?;
     let index = index::load_for_project(root, &manifest)?;
-    let packages = interactive::select_dependencies(input, output, &index)?;
-    if packages.is_empty() {
-        Ok(manifest)
-    } else {
-        add(root, &packages)
+    let interactive_packages = interactive::select_dependencies(input, output, &index)?;
+    let packages = merge_requested_packages(&interactive_packages, explicit_packages);
+    add_then_sync(root, &packages, options)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_requested_packages;
+
+    #[test]
+    fn merge_requested_packages_preserves_order_and_deduplicates() {
+        let merged = merge_requested_packages(
+            &[
+                "MotorDrivers::DJI".to_string(),
+                "bsp::CANDriver".to_string(),
+            ],
+            &[
+                "bsp::CANDriver".to_string(),
+                "services::Watchdog".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            merged,
+            vec!["MotorDrivers::DJI", "bsp::CANDriver", "services::Watchdog"]
+        );
     }
 }

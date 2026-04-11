@@ -5,9 +5,9 @@ use std::path::Path;
 use tracing_subscriber;
 
 use cpkg::{
-    ProjectInitOptions, SubmoduleProtocol, SyncOptions, add_packages, add_packages_interactive,
-    create_package, generate_package, init_package, init_project, init_project_interactive,
-    remove_packages, sync_project,
+    ProjectInitOptions, SubmoduleProtocol, SyncOptions, add_packages_and_sync,
+    add_packages_interactive, create_package, generate_package, init_package, init_project,
+    init_project_interactive, remove_packages, sync_project,
 };
 
 #[derive(Parser)]
@@ -49,11 +49,19 @@ struct ProjectInitArgs {
 struct PackageListArgs {
     #[arg(short = 'I', long)]
     interactive: bool,
+    #[command(flatten)]
+    sync: SyncOptionArgs,
     packages: Vec<String>,
 }
 
 #[derive(Args)]
 struct SyncArgs {
+    #[command(flatten)]
+    sync: SyncOptionArgs,
+}
+
+#[derive(Args, Clone, Copy)]
+struct SyncOptionArgs {
     #[arg(long, value_enum, default_value_t = SubmoduleProtocolArg::Ssh)]
     submodule_protocol: SubmoduleProtocolArg,
 }
@@ -69,6 +77,14 @@ impl From<SubmoduleProtocolArg> for SubmoduleProtocol {
         match value {
             SubmoduleProtocolArg::Https => SubmoduleProtocol::Https,
             SubmoduleProtocolArg::Ssh => SubmoduleProtocol::Ssh,
+        }
+    }
+}
+
+impl From<SyncOptionArgs> for SyncOptions {
+    fn from(value: SyncOptionArgs) -> Self {
+        SyncOptions {
+            submodule_protocol: value.submodule_protocol.into(),
         }
     }
 }
@@ -114,24 +130,22 @@ fn main() -> Result<()> {
                 let stdin = io::stdin();
                 let mut input = stdin.lock();
                 let mut output = io::stdout();
-                add_packages_interactive(cwd, &mut input, &mut output)?;
-                if !args.packages.is_empty() {
-                    add_packages(cwd, &args.packages)?;
-                }
+                add_packages_interactive(
+                    cwd,
+                    &args.packages,
+                    args.sync.into(),
+                    &mut input,
+                    &mut output,
+                )?;
             } else {
-                add_packages(cwd, &args.packages)?;
+                add_packages_and_sync(cwd, &args.packages, args.sync.into())?;
             }
         }
         Commands::Remove(args) => {
             remove_packages(cwd, &args.packages)?;
         }
         Commands::Sync(args) => {
-            sync_project(
-                cwd,
-                SyncOptions {
-                    submodule_protocol: args.submodule_protocol.into(),
-                },
-            )?;
+            sync_project(cwd, args.sync.into())?;
         }
         Commands::Package { command } => match command {
             PackageCommands::Init {
