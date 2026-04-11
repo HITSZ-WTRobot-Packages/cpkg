@@ -1,3 +1,5 @@
+mod migrations;
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -15,23 +17,6 @@ pub struct Cpkg {
     pub pkgname: String,
     #[serde(default)]
     pub dependencies: Vec<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyCpkg {
-    name: String,
-    pkgname: String,
-    version: Option<String>,
-    dependencies: Option<Vec<String>>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OldCpkg {
-    namespace: String,
-    name: String,
-    deps: Option<Vec<String>>,
 }
 
 fn default_format_version() -> u32 {
@@ -55,58 +40,14 @@ pub fn save(path: &Path, cpkg: &Cpkg) -> Result<()> {
     Ok(())
 }
 
-fn migrate_legacy(content: &str) -> Option<Cpkg> {
-    toml::from_str::<LegacyCpkg>(content).ok().map(|legacy| {
-        let mut cpkg = Cpkg {
-            format_version: CURRENT_FORMAT_VERSION,
-            name: legacy.name,
-            pkgname: legacy.pkgname,
-            dependencies: legacy.dependencies.unwrap_or_default(),
-        };
-        let _ = legacy.version;
-        normalize_manifest(&mut cpkg);
-        cpkg
-    })
-}
-
-fn migrate_old(content: &str) -> Option<Cpkg> {
-    toml::from_str::<OldCpkg>(content).ok().map(|old| {
-        let mut cpkg = Cpkg {
-            format_version: CURRENT_FORMAT_VERSION,
-            name: old.name.clone(),
-            pkgname: format!("{}::{}", old.namespace, old.name),
-            dependencies: old.deps.unwrap_or_default(),
-        };
-        normalize_manifest(&mut cpkg);
-        cpkg
-    })
-}
-
 pub fn load_or_migrate_default(path: &Path) -> Result<Cpkg> {
     let content = fs::read_to_string(path).context("failed to read cpkg.toml")?;
-
-    if let Ok(mut cpkg) = toml::from_str::<Cpkg>(&content) {
-        if cpkg.format_version != CURRENT_FORMAT_VERSION {
-            anyhow::bail!(
-                "unsupported cpkg.toml format version {}",
-                cpkg.format_version
-            );
-        }
-        normalize_manifest(&mut cpkg);
-        return Ok(cpkg);
-    }
-
-    if let Some(cpkg) = migrate_legacy(&content) {
+    let (mut cpkg, migrated) = migrations::load_or_migrate(&content)?;
+    normalize_manifest(&mut cpkg);
+    if migrated {
         save(path, &cpkg)?;
-        return Ok(cpkg);
     }
-
-    if let Some(cpkg) = migrate_old(&content) {
-        save(path, &cpkg)?;
-        return Ok(cpkg);
-    }
-
-    anyhow::bail!("failed to parse cpkg.toml")
+    Ok(cpkg)
 }
 
 #[cfg(test)]
