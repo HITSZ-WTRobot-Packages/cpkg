@@ -180,13 +180,13 @@ pub fn validate_stm32_project(root: &Path, manifest: &WtrProject) -> Result<()> 
     Ok(())
 }
 
-pub fn init(root: &Path, options: ProjectInitOptions) -> Result<WtrProject> {
+pub(crate) fn prepare_init(root: &Path, options: &ProjectInitOptions) -> Result<WtrProject> {
     let manifest_path = manifest_path(root);
     if manifest_path.exists() && !options.force {
         anyhow::bail!("wtrproject.toml already exists (use --force to overwrite)");
     }
 
-    let manifest = WtrProject {
+    Ok(WtrProject {
         format_version: CURRENT_FORMAT_VERSION,
         project: ProjectSection {
             name: options.name.clone().unwrap_or(default_project_name(root)?),
@@ -194,7 +194,11 @@ pub fn init(root: &Path, options: ProjectInitOptions) -> Result<WtrProject> {
         },
         dependencies: DependencySection::default(),
         index: IndexSection::default(),
-    };
+    })
+}
+
+pub fn init(root: &Path, options: ProjectInitOptions) -> Result<WtrProject> {
+    let manifest = prepare_init(root, &options)?;
 
     save(root, &manifest)?;
     info!(
@@ -248,7 +252,7 @@ pub fn remove(root: &Path, packages: &[String]) -> Result<WtrProject> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProjectInitOptions, add, init, load, remove};
+    use super::{ProjectInitOptions, add, init, load, prepare_init, remove};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -303,6 +307,26 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("multiple .ioc files found"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prepare_init_does_not_write_manifest() {
+        let dir = make_temp_dir("project-prepare-init");
+        fs::write(dir.join("robot.ioc"), "").unwrap();
+
+        let manifest = prepare_init(
+            &dir,
+            &ProjectInitOptions {
+                force: false,
+                name: Some("robot".to_string()),
+                ioc: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(manifest.project.name, "robot");
+        assert!(!dir.join("wtrproject.toml").exists());
         let _ = fs::remove_dir_all(dir);
     }
 

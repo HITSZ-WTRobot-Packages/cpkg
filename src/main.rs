@@ -1,6 +1,5 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use std::io;
 use std::path::Path;
 use tracing_subscriber;
 
@@ -38,7 +37,7 @@ struct Cli {
 enum Commands {
     /// Initialize `wtrproject.toml` for the current STM32CubeMX project.
     Init(ProjectInitArgs),
-    /// Add direct package dependencies and synchronize `Modules/`.
+    /// Add direct dependencies, or edit them interactively, and synchronize `Modules/`.
     Add(AddArgs),
     /// Remove direct package dependencies from `wtrproject.toml`.
     Remove(RemoveArgs),
@@ -63,7 +62,7 @@ struct ProjectInitArgs {
     /// Overwrite an existing `wtrproject.toml`.
     #[arg(short, long)]
     force: bool,
-    /// Interactively browse repositories and choose initial dependencies.
+    /// Open an interactive tree picker for the initial dependencies.
     #[arg(short = 'I', long)]
     interactive: bool,
     /// Explicit project name to write into `wtrproject.toml`.
@@ -76,19 +75,20 @@ struct ProjectInitArgs {
 
 #[derive(Args)]
 #[command(
-    about = "Add direct package dependencies and immediately synchronize submodules",
+    about = "Add direct package dependencies, or edit them interactively, and synchronize submodules",
     after_help = "Examples:\n  \
 cpkg add MotorDrivers::DJI\n  \
 cpkg add MotorDrivers::DJI bsp::CANDriver --submodule-protocol ssh\n  \
-cpkg add -I --submodule-protocol https"
+cpkg add -I --submodule-protocol https\n  \
+cpkg add -I MotorDrivers::DJI"
 )]
 struct AddArgs {
-    /// Interactively browse repositories and choose packages to add.
+    /// Edit direct dependencies in an interactive tree picker.
     #[arg(short = 'I', long)]
     interactive: bool,
     #[command(flatten)]
     sync: SyncOptionArgs,
-    /// Direct package names to add, such as `MotorDrivers::DJI`.
+    /// Direct package names to add, or preselect when using `-I`.
     #[arg(value_name = "PACKAGE", required_unless_present = "interactive")]
     packages: Vec<String>,
 }
@@ -186,26 +186,14 @@ fn main() -> Result<()> {
                 ioc: args.ioc,
             };
             if args.interactive {
-                let stdin = io::stdin();
-                let mut input = stdin.lock();
-                let mut output = io::stdout();
-                init_project_interactive(cwd, options, &mut input, &mut output)?;
+                init_project_interactive(cwd, options)?;
             } else {
                 init_project(cwd, options)?;
             }
         }
         Commands::Add(args) => {
             if args.interactive {
-                let stdin = io::stdin();
-                let mut input = stdin.lock();
-                let mut output = io::stdout();
-                add_packages_interactive(
-                    cwd,
-                    &args.packages,
-                    args.sync.into(),
-                    &mut input,
-                    &mut output,
-                )?;
+                add_packages_interactive(cwd, &args.packages, args.sync.into())?;
             } else {
                 add_packages_and_sync(cwd, &args.packages, args.sync.into())?;
             }
