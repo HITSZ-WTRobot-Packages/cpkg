@@ -549,6 +549,7 @@ fn fit_to_width(text: &str, width: usize) -> String {
 }
 
 fn render_item(state: &TreePickerState, item: VisibleItem) -> String {
+    // TODO: Add character-level search-hit highlighting when the user explicitly requests it.
     match item {
         VisibleItem::Repository(repo_index) => {
             let group = &state.groups[repo_index];

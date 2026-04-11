@@ -38,6 +38,7 @@ When changing CLI behavior, update the help text in `src/main.rs` and verify the
 - `cpkg add -I` should behave like editing the current direct dependency set: existing direct dependencies start preselected, and the confirmed selection becomes the new direct dependency list.
 - Preselected or currently selected packages in the interactive picker should have clear visual highlighting beyond the checkbox marker alone.
 - The confirmation output for `cpkg add -I` should summarize dependency changes (added/removed/unchanged) instead of only reporting the final selected package count.
+- Search-hit character-level highlighting is intentionally deferred for now; keep it tracked as a TODO and do not implement it unless the user asks again.
 
 ## STM32CubeMX Project Assumptions
 Project-side commands operate on STM32CubeMX firmware repositories only.
