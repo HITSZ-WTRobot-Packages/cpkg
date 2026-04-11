@@ -101,6 +101,12 @@ fn sync_repository(root: &Path, repository: &ManagedRepository) -> Result<()> {
 
     run_git(
         root,
+        &["submodule", "set-url", "--", rel_path, &repository.url],
+        &format!("setting remote URL for {}", repository.name),
+    )?;
+
+    run_git(
+        root,
         &[
             "submodule",
             "set-branch",

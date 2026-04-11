@@ -12,6 +12,7 @@ pub use self::manifest::{
     DependencySection, IndexSection, ProjectInitOptions, ProjectSection, WtrProject, add, init,
     load, manifest_path, project_ioc_path, remove, save, validate_stm32_project,
 };
+pub use self::resolver::SubmoduleProtocol;
 
 #[derive(Debug, Clone)]
 pub struct SyncSummary {
@@ -21,12 +22,21 @@ pub struct SyncSummary {
     pub integration_file: PathBuf,
 }
 
-pub fn sync(root: &Path) -> Result<SyncSummary> {
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SyncOptions {
+    pub submodule_protocol: SubmoduleProtocol,
+}
+
+pub fn sync(root: &Path, options: SyncOptions) -> Result<SyncSummary> {
     let manifest = load(root)?;
     validate_stm32_project(root, &manifest)?;
 
     let index = index::load_for_project(root, &manifest)?;
-    let resolved = resolver::resolve(&index, &manifest.dependencies.packages)?;
+    let resolved = resolver::resolve(
+        &index,
+        &manifest.dependencies.packages,
+        options.submodule_protocol,
+    )?;
     submodule::sync_repositories(root, &resolved.repositories)?;
     let integration_file = integration::write_integration_file(root, &resolved)?;
 

@@ -4,7 +4,15 @@ use std::collections::{HashMap, HashSet};
 use super::index::{IndexedPackage, PackageIndex};
 
 const BUILTIN_TARGETS: &[&str] = &["FreeRTOS", "stm32cubemx"];
-const DEFAULT_REPO_BASE_URL: &str = "https://github.com/HITSZ-WTRobot-Packages";
+const HTTPS_REPO_BASE_URL: &str = "https://github.com/HITSZ-WTRobot-Packages";
+const SSH_REPO_BASE_URL: &str = "git@github.com:HITSZ-WTRobot-Packages";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SubmoduleProtocol {
+    Https,
+    #[default]
+    Ssh,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedProject {
@@ -35,8 +43,11 @@ enum VisitState {
     Visited,
 }
 
-fn repo_url(repo: &str) -> String {
-    format!("{DEFAULT_REPO_BASE_URL}/{repo}.git")
+fn repo_url_with_protocol(repo: &str, protocol: SubmoduleProtocol) -> String {
+    match protocol {
+        SubmoduleProtocol::Https => format!("{HTTPS_REPO_BASE_URL}/{repo}.git"),
+        SubmoduleProtocol::Ssh => format!("{SSH_REPO_BASE_URL}/{repo}.git"),
+    }
 }
 
 fn is_builtin_target(package: &str) -> bool {
@@ -119,7 +130,11 @@ fn resolve_package(
     Ok(())
 }
 
-pub fn resolve(index: &PackageIndex, requested_packages: &[String]) -> Result<ResolvedProject> {
+pub fn resolve(
+    index: &PackageIndex,
+    requested_packages: &[String],
+    submodule_protocol: SubmoduleProtocol,
+) -> Result<ResolvedProject> {
     let direct_targets = stable_unique(requested_packages);
     let packages = build_package_map(index)?;
     let mut states = HashMap::new();
@@ -142,7 +157,7 @@ pub fn resolve(index: &PackageIndex, requested_packages: &[String]) -> Result<Re
         .iter()
         .map(|package| ManagedRepository {
             name: package.repo.clone(),
-            url: repo_url(&package.repo),
+            url: repo_url_with_protocol(&package.repo, submodule_protocol),
             rel_path: format!("Modules/{}", package.repo),
         })
         .collect::<Vec<_>>();
@@ -159,7 +174,7 @@ pub fn resolve(index: &PackageIndex, requested_packages: &[String]) -> Result<Re
 
 #[cfg(test)]
 mod tests {
-    use super::resolve;
+    use super::{SubmoduleProtocol, resolve};
     use crate::project::index::{IndexedPackage, PackageIndex};
 
     fn sample_index() -> PackageIndex {
@@ -199,7 +214,12 @@ mod tests {
 
     #[test]
     fn resolve_collects_transitive_packages_and_repositories() {
-        let resolved = resolve(&sample_index(), &["MotorDrivers::DJI".to_string()]).unwrap();
+        let resolved = resolve(
+            &sample_index(),
+            &["MotorDrivers::DJI".to_string()],
+            SubmoduleProtocol::Ssh,
+        )
+        .unwrap();
 
         assert_eq!(resolved.direct_targets, vec!["MotorDrivers::DJI"]);
         assert_eq!(resolved.external_targets, vec!["stm32cubemx"]);
@@ -207,6 +227,25 @@ mod tests {
         assert_eq!(resolved.repositories.len(), 2);
         assert_eq!(resolved.repositories[0].name, "BasicComponents");
         assert_eq!(resolved.repositories[1].name, "MotorDrivers");
+        assert_eq!(
+            resolved.repositories[1].url,
+            "git@github.com:HITSZ-WTRobot-Packages/MotorDrivers.git"
+        );
+    }
+
+    #[test]
+    fn resolve_supports_https_repository_urls() {
+        let resolved = resolve(
+            &sample_index(),
+            &["MotorDrivers::DJI".to_string()],
+            SubmoduleProtocol::Https,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolved.repositories[1].url,
+            "https://github.com/HITSZ-WTRobot-Packages/MotorDrivers.git"
+        );
     }
 
     #[test]
@@ -233,7 +272,7 @@ mod tests {
             ],
         };
 
-        let error = resolve(&index, &["Cycle::A".to_string()]).unwrap_err();
+        let error = resolve(&index, &["Cycle::A".to_string()], SubmoduleProtocol::Ssh).unwrap_err();
         assert!(error.to_string().contains("dependency cycle detected"));
     }
 }

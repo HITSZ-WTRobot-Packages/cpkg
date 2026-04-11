@@ -1,11 +1,11 @@
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::Path;
 use tracing_subscriber;
 
 use cpkg::{
-    ProjectInitOptions, add_packages, create_package, generate_package, init_package, init_project,
-    remove_packages, sync_project,
+    ProjectInitOptions, SubmoduleProtocol, SyncOptions, add_packages, create_package,
+    generate_package, init_package, init_project, remove_packages, sync_project,
 };
 
 #[derive(Parser)]
@@ -24,7 +24,7 @@ enum Commands {
     Init(ProjectInitArgs),
     Add(PackageListArgs),
     Remove(PackageListArgs),
-    Sync,
+    Sync(SyncArgs),
     Package {
         #[command(subcommand)]
         command: PackageCommands,
@@ -44,6 +44,27 @@ struct ProjectInitArgs {
 #[derive(Args)]
 struct PackageListArgs {
     packages: Vec<String>,
+}
+
+#[derive(Args)]
+struct SyncArgs {
+    #[arg(long, value_enum, default_value_t = SubmoduleProtocolArg::Ssh)]
+    submodule_protocol: SubmoduleProtocolArg,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SubmoduleProtocolArg {
+    Https,
+    Ssh,
+}
+
+impl From<SubmoduleProtocolArg> for SubmoduleProtocol {
+    fn from(value: SubmoduleProtocolArg) -> Self {
+        match value {
+            SubmoduleProtocolArg::Https => SubmoduleProtocol::Https,
+            SubmoduleProtocolArg::Ssh => SubmoduleProtocol::Ssh,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -83,8 +104,13 @@ fn main() -> Result<()> {
         Commands::Remove(args) => {
             remove_packages(cwd, &args.packages)?;
         }
-        Commands::Sync => {
-            sync_project(cwd)?;
+        Commands::Sync(args) => {
+            sync_project(
+                cwd,
+                SyncOptions {
+                    submodule_protocol: args.submodule_protocol.into(),
+                },
+            )?;
         }
         Commands::Package { command } => match command {
             PackageCommands::Init {
