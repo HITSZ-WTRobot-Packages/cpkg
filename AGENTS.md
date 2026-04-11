@@ -32,6 +32,12 @@ There are now two distinct command families:
   - `cpkg package create`
 
 When changing CLI behavior, update the help text in `src/main.rs` and verify the relevant `--help` output.
+- Keep interactive dependency selection in a single tree-style picker; avoid multi-step repository-then-package selection flows unless the user explicitly asks for them.
+- Interactive selection must not write or modify project files until the user confirms the final selection.
+- The tree-style picker should support inline fuzzy search/filtering without leaving the interactive view.
+- `cpkg add -I` should behave like editing the current direct dependency set: existing direct dependencies start preselected, and the confirmed selection becomes the new direct dependency list.
+- Preselected or currently selected packages in the interactive picker should have clear visual highlighting beyond the checkbox marker alone.
+- The confirmation output for `cpkg add -I` should summarize dependency changes (added/removed/unchanged) instead of only reporting the final selected package count.
 
 ## STM32CubeMX Project Assumptions
 Project-side commands operate on STM32CubeMX firmware repositories only.
@@ -62,6 +68,7 @@ The current default remote index is the WTR package index on GitHub. Keep index-
 - `cargo fmt --check` — verify formatting before review.
 
 Use targeted `cargo run --offline -- <command> --help` checks when editing CLI docs or argument parsing.
+When a change needs to fetch a new crate, refresh `Cargo.lock`, or otherwise update dependencies, it is allowed to run the relevant Cargo command without `--offline`.
 
 ## Coding Style & Naming Conventions
 Follow default Rust style: 4-space indentation, `snake_case` for functions/modules, `PascalCase` for types, and concise error messages with `anyhow::Context`.
@@ -85,6 +92,7 @@ Place unit tests next to the code they validate using `#[cfg(test)] mod tests`.
 - Cover `wtrproject.toml` behavior, package-index loading, dependency resolution, submodule/integration generation logic, and `cpkg.toml` migrations.
 - Add focused regression tests for CLI parsing changes when behavior is non-trivial.
 - Run the most targeted checks first, then broader validation such as `cargo test --offline`.
+- If dependency changes require network access or a lockfile refresh, use the smallest non-offline Cargo command that unblocks verification, then resume targeted checks.
 
 ## Commit & Pull Request Guidelines
 Keep commits scoped to one change and use commit messages in `type(scope): content` form, for example `docs(cli): expand command help text`.
@@ -97,3 +105,4 @@ Keep commits scoped to one change and use commit messages in `type(scope): conte
 
 - Prefer updating package metadata through `cpkg package init`, `cpkg package generate`, and `cpkg package create` instead of editing generated outputs by hand.
 - Prefer updating project dependency state through `cpkg init`, `cpkg add`, `cpkg remove`, and `cpkg sync` instead of editing generated integration files by hand.
+- If the user's requirements change and the new requirement should be captured in `AGENTS.md`, update `AGENTS.md` immediately before continuing the implementation.
