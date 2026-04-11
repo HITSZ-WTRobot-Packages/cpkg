@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::{info, warn};
 
+use super::network::run_logged_command;
 use super::{IndexSection, WtrProject};
 
 pub const DEFAULT_INDEX_URL: &str =
@@ -132,27 +133,11 @@ pub fn load_from_path(path: &Path) -> Result<PackageIndex> {
 }
 
 fn run_curl_download(url: &str, target: &Path) -> Result<()> {
-    let output = Command::new("curl")
-        .arg("-fsSL")
-        .arg("-o")
-        .arg(target)
-        .arg(url)
-        .output()
+    let mut command = Command::new("curl");
+    command.arg("-fsSL").arg("-o").arg(target).arg(url);
+    run_logged_command(&mut command, "Downloading package index with curl")
         .context("failed to execute curl for package index download")?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    anyhow::bail!(
-        "curl failed: {}",
-        if stderr.is_empty() {
-            "unknown curl error".to_string()
-        } else {
-            stderr
-        }
-    );
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -165,31 +150,21 @@ fn run_powershell_download(program: &str, url: &str, target: &Path) -> Result<()
     let url = power_shell_literal(url);
     let target = power_shell_literal(&target.to_string_lossy());
     let command = format!("Invoke-WebRequest -Uri '{url}' -OutFile '{target}'");
-    let output = Command::new(program)
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            &command,
-        ])
-        .output()
-        .with_context(|| format!("failed to execute {program} for package index download"))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    anyhow::bail!(
-        "{program} failed: {}",
-        if stderr.is_empty() {
-            "unknown PowerShell error".to_string()
-        } else {
-            stderr
-        }
-    );
+    let mut process = Command::new(program);
+    process.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        &command,
+    ]);
+    run_logged_command(
+        &mut process,
+        &format!("Downloading package index with {program}"),
+    )
+    .with_context(|| format!("failed to execute {program} for package index download"))?;
+    Ok(())
 }
 
 fn download_index(url: &str, cache_path: &Path) -> Result<()> {

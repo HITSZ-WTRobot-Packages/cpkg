@@ -34,6 +34,8 @@ There are now two distinct command families:
 When changing CLI behavior, update the help text in `src/main.rs` and verify the relevant `--help` output.
 - Keep interactive dependency selection in a single tree-style picker; avoid multi-step repository-then-package selection flows unless the user explicitly asks for them.
 - Interactive selection must not write or modify project files until the user confirms the final selection.
+- Once the user confirms a direct-dependency change, write `wtrproject.toml` before any follow-up network-backed work so an interrupted run can be resumed with `cpkg sync`.
+- Network-backed operations should surface live execution status to the user; prefer a temporary, bounded terminal log panel over silent background work.
 - The tree-style picker should support inline fuzzy search/filtering without leaving the interactive view.
 - `cpkg add -I` should behave like editing the current direct dependency set: existing direct dependencies start preselected, and the confirmed selection becomes the new direct dependency list.
 - Preselected or currently selected packages in the interactive picker should have clear visual highlighting beyond the checkbox marker alone.

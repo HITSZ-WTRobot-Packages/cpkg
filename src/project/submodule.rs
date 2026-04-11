@@ -4,30 +4,37 @@ use std::path::Path;
 use std::process::Command;
 use tracing::info;
 
+use super::network::run_logged_command;
 use super::resolver::ManagedRepository;
 
-fn run_git(root: &Path, args: &[&str], description: &str) -> Result<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to run git for {}", description))?;
+fn run_git(root: &Path, args: &[&str], description: &str, show_logs: bool) -> Result<String> {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(root).args(args);
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        anyhow::bail!(
-            "git failed while {}: {}",
-            description,
-            if stderr.is_empty() {
-                "unknown git error".to_string()
-            } else {
-                stderr
-            }
-        );
+    if show_logs {
+        let output = run_logged_command(&mut command, description)
+            .with_context(|| format!("failed to run git for {description}"))?;
+        Ok(output.stdout.trim().to_string())
+    } else {
+        let output = command
+            .output()
+            .with_context(|| format!("failed to run git for {}", description))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            anyhow::bail!(
+                "git failed while {}: {}",
+                description,
+                if stderr.is_empty() {
+                    "unknown git error".to_string()
+                } else {
+                    stderr
+                }
+            );
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn ensure_git_repository_root(root: &Path) -> Result<()> {
@@ -35,6 +42,7 @@ fn ensure_git_repository_root(root: &Path) -> Result<()> {
         root,
         &["rev-parse", "--show-toplevel"],
         "checking repository root",
+        false,
     )?;
     let canonical_root = fs::canonicalize(root).context("failed to resolve current directory")?;
     let canonical_toplevel =
@@ -96,6 +104,7 @@ fn sync_repository(root: &Path, repository: &ManagedRepository) -> Result<()> {
             root,
             &["submodule", "add", "-b", "main", &repository.url, rel_path],
             &format!("adding submodule {}", repository.name),
+            true,
         )?;
     }
 
@@ -103,6 +112,7 @@ fn sync_repository(root: &Path, repository: &ManagedRepository) -> Result<()> {
         root,
         &["submodule", "set-url", "--", rel_path, &repository.url],
         &format!("setting remote URL for {}", repository.name),
+        false,
     )?;
 
     run_git(
@@ -116,11 +126,13 @@ fn sync_repository(root: &Path, repository: &ManagedRepository) -> Result<()> {
             rel_path,
         ],
         &format!("tracking main for {}", repository.name),
+        false,
     )?;
     run_git(
         root,
         &["submodule", "update", "--init", "--remote", "--", rel_path],
         &format!("updating submodule {}", repository.name),
+        true,
     )?;
 
     let abs_path_string = abs_path.to_string_lossy().into_owned();
@@ -128,6 +140,7 @@ fn sync_repository(root: &Path, repository: &ManagedRepository) -> Result<()> {
         root,
         &["-C", &abs_path_string, "checkout", "main"],
         &format!("checking out main for {}", repository.name),
+        false,
     )?;
     run_git(
         root,
@@ -140,6 +153,7 @@ fn sync_repository(root: &Path, repository: &ManagedRepository) -> Result<()> {
             "main",
         ],
         &format!("pulling latest main for {}", repository.name),
+        true,
     )?;
 
     info!("synchronized submodule {}", repository.name);

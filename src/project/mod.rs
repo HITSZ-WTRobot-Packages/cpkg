@@ -2,6 +2,7 @@ pub mod index;
 pub mod integration;
 pub mod interactive;
 pub mod manifest;
+pub mod network;
 pub mod resolver;
 pub mod submodule;
 
@@ -149,14 +150,37 @@ fn write_add_interactive_summary(previous: &[String], next: &[String]) -> Result
     Ok(())
 }
 
+fn update_manifest_then<Update, FollowUp>(
+    root: &Path,
+    update: Update,
+    follow_up: FollowUp,
+) -> Result<WtrProject>
+where
+    Update: FnOnce(&mut WtrProject),
+    FollowUp: FnOnce() -> Result<()>,
+{
+    let mut manifest = load(root)?;
+    update(&mut manifest);
+    save(root, &manifest)?;
+    follow_up()?;
+    load(root)
+}
+
 fn add_then_sync(root: &Path, packages: &[String], options: SyncOptions) -> Result<WtrProject> {
     if packages.is_empty() {
         return load(root);
     }
 
-    add(root, packages)?;
-    sync(root, options)?;
-    load(root)
+    update_manifest_then(
+        root,
+        |manifest| {
+            manifest
+                .dependencies
+                .packages
+                .extend(packages.iter().cloned());
+        },
+        || sync(root, options).map(|_| ()),
+    )
 }
 
 fn replace_dependencies_then_sync(
@@ -164,11 +188,11 @@ fn replace_dependencies_then_sync(
     packages: &[String],
     options: SyncOptions,
 ) -> Result<WtrProject> {
-    let mut manifest = load(root)?;
-    manifest.dependencies.packages = packages.to_vec();
-    save(root, &manifest)?;
-    sync(root, options)?;
-    load(root)
+    update_manifest_then(
+        root,
+        |manifest| manifest.dependencies.packages = packages.to_vec(),
+        || sync(root, options).map(|_| ()),
+    )
 }
 
 pub fn sync(root: &Path, options: SyncOptions) -> Result<SyncSummary> {
@@ -239,9 +263,30 @@ pub fn add_interactive(
 
 #[cfg(test)]
 mod tests {
-    use super::{dependency_edit_summary, init_guidance_lines, merge_requested_packages};
+    use super::{
+        dependency_edit_summary, init_guidance_lines, merge_requested_packages,
+        update_manifest_then,
+    };
     use crate::project::manifest::CURRENT_FORMAT_VERSION;
-    use crate::project::{DependencySection, IndexSection, ProjectSection, WtrProject};
+    use crate::project::{
+        DependencySection, IndexSection, ProjectInitOptions, ProjectSection, WtrProject, init, load,
+    };
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn make_temp_dir(prefix: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "cpkg-{prefix}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
 
     #[test]
     fn merge_requested_packages_preserves_order_and_deduplicates() {
@@ -297,6 +342,36 @@ mod tests {
 
         assert!(!lines.iter().any(|line| line.contains("cpkg add <PACKAGE>")));
         assert!(lines.iter().any(|line| line.contains("cpkg sync")));
+    }
+
+    #[test]
+    fn update_manifest_then_persists_changes_before_follow_up_failure() {
+        let dir = make_temp_dir("persist-before-follow-up");
+        fs::write(dir.join("robot.ioc"), "").unwrap();
+
+        init(
+            &dir,
+            ProjectInitOptions {
+                force: false,
+                name: Some("robot".to_string()),
+                ioc: None,
+            },
+        )
+        .unwrap();
+
+        let error = update_manifest_then(
+            &dir,
+            |manifest| manifest.dependencies.packages = vec!["MotorDrivers::DJI".to_string()],
+            || Err(anyhow::anyhow!("simulated network failure")),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("simulated network failure"));
+
+        let manifest = load(&dir).unwrap();
+        assert_eq!(manifest.dependencies.packages, vec!["MotorDrivers::DJI"]);
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
