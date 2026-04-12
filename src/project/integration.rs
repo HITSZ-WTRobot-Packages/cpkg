@@ -40,6 +40,11 @@ pub fn generate_string(resolved: &ResolvedProject) -> String {
         .iter()
         .map(|repository| repository.name.clone())
         .collect::<Vec<_>>();
+    let managed_package_dirs = resolved
+        .managed_packages
+        .iter()
+        .map(|package| package.path.clone())
+        .collect::<Vec<_>>();
     let mut resolved_targets = resolved
         .managed_packages
         .iter()
@@ -61,15 +66,20 @@ pub fn generate_string(resolved: &ResolvedProject) -> String {
     );
     content.push_str(&render_list("WTR_MANAGED_REPOSITORIES", &repositories));
     content.push('\n');
+    content.push_str(&render_list(
+        "WTR_MANAGED_PACKAGE_DIRS",
+        &managed_package_dirs,
+    ));
+    content.push('\n');
     content.push_str(
-        r#"foreach(_wtr_repo IN LISTS WTR_MANAGED_REPOSITORIES)
-    if(NOT EXISTS "${CMAKE_CURRENT_LIST_DIR}/../Modules/${_wtr_repo}/CMakeLists.txt")
-        message(FATAL_ERROR "Missing managed repository '${CMAKE_CURRENT_LIST_DIR}/../Modules/${_wtr_repo}'. Run cpkg sync.")
+        r#"foreach(_wtr_package_dir IN LISTS WTR_MANAGED_PACKAGE_DIRS)
+    if(NOT EXISTS "${CMAKE_CURRENT_LIST_DIR}/../${_wtr_package_dir}/CMakeLists.txt")
+        message(FATAL_ERROR "Missing managed package '${CMAKE_CURRENT_LIST_DIR}/../${_wtr_package_dir}'. Run cpkg sync.")
     endif()
 
     add_subdirectory(
-        "${CMAKE_CURRENT_LIST_DIR}/../Modules/${_wtr_repo}"
-        "${CMAKE_BINARY_DIR}/cpkg/${_wtr_repo}"
+        "${CMAKE_CURRENT_LIST_DIR}/../${_wtr_package_dir}"
+        "${CMAKE_BINARY_DIR}/cpkg/${_wtr_package_dir}"
     )
 endforeach()
 
@@ -203,7 +213,10 @@ mod tests {
         });
 
         assert!(content.contains("WTR_MANAGED_REPOSITORIES"));
+        assert!(content.contains("WTR_MANAGED_PACKAGE_DIRS"));
         assert!(content.contains("BasicComponents"));
+        assert!(content.contains("Modules/BasicComponents/bsp/can_driver"));
+        assert!(content.contains("Modules/MotorDrivers/motors/DJI"));
         assert!(content.contains("MotorDrivers::DJI"));
         assert!(content.contains("add_library(wtr_project_dependencies INTERFACE)"));
         assert!(content.contains("function(wtr_link_packages target)"));
@@ -213,6 +226,7 @@ mod tests {
             content
                 .contains("target_link_libraries(${target} PUBLIC ${WTR_DIRECT_PACKAGE_TARGETS})")
         );
+        assert!(!content.contains("${CMAKE_BINARY_DIR}/cpkg/${_wtr_repo}"));
     }
 
     #[test]

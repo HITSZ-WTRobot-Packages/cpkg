@@ -275,9 +275,12 @@ wtr_link_packages_public(${PROJECT_NAME})
 `cpkg` 还会在生成文件中创建：
 
 - `WTR_MANAGED_REPOSITORIES`
+- `WTR_MANAGED_PACKAGE_DIRS`
 - `WTR_DIRECT_PACKAGE_TARGETS`
 - `WTR_RESOLVED_PACKAGE_TARGETS`
 - `wtr_project_dependencies`
+
+生成的 `cmake/wtr_modules.cmake` 只会对当前依赖链上的包目录调用 `add_subdirectory(...)`，不会把同一仓库里未被依赖的其他包一起编译。
 
 ## 快速开始：包作者工作流
 

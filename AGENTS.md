@@ -102,6 +102,7 @@ Project-side commands operate on STM32CubeMX firmware repositories only.
 - Run project commands from the Git repository root.
 - The project root must contain exactly one applicable `*.ioc` file unless the user passes `--ioc`.
 - Managed driver repositories live under `Modules/` and are tracked as Git submodules.
+- Generated `cmake/wtr_modules.cmake` should call `add_subdirectory(...)` only for resolved package directories in the active dependency chain; do not pull unrelated package directories from the same repository into the build.
 - Synchronization always pulls the latest upstream state and forces managed submodules to track the `main` branch.
 - Direct project dependencies are stored in `wtrproject.toml`; there is currently no lockfile.
 - Package versions are currently non-semantic for resolution purposes; treat the latest indexed package as the only selectable version.

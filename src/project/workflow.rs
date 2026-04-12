@@ -423,4 +423,70 @@ mod tests {
         assert!(!integration.contains("set(WTR_DIRECT_PACKAGE_TARGETS\n    MotorDrivers::DJI"));
         let _ = fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn refresh_project_links_only_adds_package_dirs_in_dependency_chain() {
+        let dir = make_temp_dir("refresh-package-subdirs");
+        fs::write(dir.join("robot.ioc"), "").unwrap();
+        fs::write(
+            dir.join("cpkg_index.json"),
+            r#"{
+  "generated_at":"2026-01-01T00:00:00Z",
+  "packages":[
+    {
+      "repo":"SharedRepo",
+      "path":"Modules/SharedRepo/core",
+      "name":"Core",
+      "pkgname":"SharedRepo::Core",
+      "version":"0.1.0",
+      "dependencies":[]
+    },
+    {
+      "repo":"SharedRepo",
+      "path":"Modules/SharedRepo/feature_a",
+      "name":"FeatureA",
+      "pkgname":"SharedRepo::FeatureA",
+      "version":"0.1.0",
+      "dependencies":["SharedRepo::Core"]
+    },
+    {
+      "repo":"SharedRepo",
+      "path":"Modules/SharedRepo/feature_b",
+      "name":"FeatureB",
+      "pkgname":"SharedRepo::FeatureB",
+      "version":"0.1.0",
+      "dependencies":[]
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        init(
+            &dir,
+            ProjectInitOptions {
+                force: false,
+                name: Some("robot".to_string()),
+                ioc: None,
+            },
+        )
+        .unwrap();
+
+        let mut manifest = load(&dir).unwrap();
+        manifest.dependencies.packages = vec!["SharedRepo::FeatureA".to_string()];
+        save(&dir, &manifest).unwrap();
+
+        let integration_path =
+            refresh_project_links(&dir, &manifest, SyncOptions::default()).unwrap();
+        let integration = fs::read_to_string(&integration_path).unwrap();
+
+        assert!(integration.contains("set(WTR_MANAGED_REPOSITORIES\n    SharedRepo\n)"));
+        assert!(integration.contains("Modules/SharedRepo/core"));
+        assert!(integration.contains("Modules/SharedRepo/feature_a"));
+        assert!(!integration.contains("Modules/SharedRepo/feature_b"));
+        assert!(integration.contains("\"${CMAKE_CURRENT_LIST_DIR}/../${_wtr_package_dir}\""));
+        assert!(!integration.contains("\"${CMAKE_CURRENT_LIST_DIR}/../Modules/${_wtr_repo}\""));
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }
