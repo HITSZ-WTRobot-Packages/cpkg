@@ -12,21 +12,29 @@ use self::git::{
     ensure_git_repository_root, managed_repository_names_from_gitmodules,
     repair_gitmodules_if_needed, tracked_repository_names_from_git_index,
 };
-use self::sync::{execute_network_syncs, prepare_repository_sync};
+use self::sync::{execute_pending_syncs, prepare_repository_sync};
 use super::resolver::ManagedRepository;
 
 pub fn sync_repositories(root: &Path, repositories: &[ManagedRepository]) -> Result<()> {
+    sync_repositories_with_options(root, repositories, false)
+}
+
+pub fn sync_repositories_with_options(
+    root: &Path,
+    repositories: &[ManagedRepository],
+    offline: bool,
+) -> Result<()> {
     ensure_git_repository_root(root)?;
     fs::create_dir_all(root.join("Modules")).context("failed to create Modules directory")?;
     repair_gitmodules_if_needed(root, repositories)?;
 
     let mut pending_syncs = Vec::new();
     for repository in repositories {
-        if let Some(sync) = prepare_repository_sync(root, repository)? {
+        if let Some(sync) = prepare_repository_sync(root, repository, offline)? {
             pending_syncs.push(sync);
         }
     }
-    execute_network_syncs(pending_syncs)?;
+    execute_pending_syncs(pending_syncs)?;
 
     Ok(())
 }
@@ -61,9 +69,11 @@ pub fn remove_unused_repositories(
 #[cfg(test)]
 mod tests {
     use super::cleanup::{remove_repository, repository_names_to_remove};
-    use super::git::{current_branch, is_registered_submodule, submodule_git_dir};
+    use super::git::{
+        current_branch, is_registered_submodule, submodule_git_dir, supports_offline_submodule_add,
+    };
     use super::sync::{NETWORK_SYNC_MAX_ATTEMPTS, run_network_sync_with_retry};
-    use super::{remove_unused_repositories, sync_repositories};
+    use super::{remove_unused_repositories, sync_repositories, sync_repositories_with_options};
     use crate::project::resolver::ManagedRepository;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -638,6 +648,127 @@ mod tests {
 
         let head = head_commit(&root.join(rel_path));
         assert_eq!(head, latest_commit);
+
+        let _ = fs::remove_dir_all(origin);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sync_repository_offline_keeps_initialized_submodule_on_cached_commit() {
+        allow_file_protocol();
+
+        let origin = make_temp_dir("origin");
+        init_repo(&origin);
+        commit_file(&origin, "README.md", "v1\n", "init");
+        run_git(&origin, &["branch", "-M", "main"]);
+
+        let root = make_temp_dir("root");
+        init_repo(&root);
+        fs::create_dir_all(root.join("Modules")).unwrap();
+
+        let origin_url = origin
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let rel_path = "Modules/TrajectoryControl";
+        let repository = ManagedRepository {
+            name: "TrajectoryControl".to_string(),
+            url: origin_url,
+            rel_path: rel_path.to_string(),
+        };
+
+        sync_repositories(&root, &[repository.clone()]).unwrap();
+        let cached_commit = head_commit(&root.join(rel_path));
+        let latest_commit = commit_file(&origin, "README.md", "v2\n", "update");
+
+        sync_repositories_with_options(&root, &[repository], true).unwrap();
+
+        assert_eq!(
+            current_branch(&root.join(rel_path)).unwrap().as_deref(),
+            Some("main")
+        );
+        assert_eq!(head_commit(&root.join(rel_path)), cached_commit);
+        assert_ne!(cached_commit, latest_commit);
+
+        let _ = fs::remove_dir_all(origin);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sync_repository_offline_initializes_submodule_from_local_cache() {
+        allow_file_protocol();
+
+        let origin = make_temp_dir("origin");
+        init_repo(&origin);
+        commit_file(&origin, "README.md", "v1\n", "init");
+        run_git(&origin, &["branch", "-M", "main"]);
+
+        let root = make_temp_dir("root");
+        init_repo(&root);
+        fs::create_dir_all(root.join("Modules")).unwrap();
+
+        let origin_url = origin
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let rel_path = "Modules/TrajectoryControl";
+        let repository = ManagedRepository {
+            name: "TrajectoryControl".to_string(),
+            url: origin_url,
+            rel_path: rel_path.to_string(),
+        };
+
+        sync_repositories(&root, &[repository.clone()]).unwrap();
+        let cached_commit = head_commit(&root.join(rel_path));
+        let latest_commit = commit_file(&origin, "README.md", "v2\n", "update");
+
+        run_git(&root, &["submodule", "deinit", "-f", "--", rel_path]);
+        sync_repositories_with_options(&root, &[repository], true).unwrap();
+
+        assert_eq!(
+            current_branch(&root.join(rel_path)).unwrap().as_deref(),
+            Some("main")
+        );
+        assert_eq!(head_commit(&root.join(rel_path)), cached_commit);
+        assert_ne!(cached_commit, latest_commit);
+
+        let _ = fs::remove_dir_all(origin);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sync_repository_offline_reports_when_git_cannot_add_without_fetch() {
+        allow_file_protocol();
+
+        if supports_offline_submodule_add().unwrap() {
+            return;
+        }
+
+        let origin = make_temp_dir("origin");
+        init_repo(&origin);
+        commit_file(&origin, "README.md", "v1\n", "init");
+        run_git(&origin, &["branch", "-M", "main"]);
+
+        let root = make_temp_dir("root");
+        init_repo(&root);
+        fs::create_dir_all(root.join("Modules")).unwrap();
+
+        let repository = ManagedRepository {
+            name: "TrajectoryControl".to_string(),
+            url: origin
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            rel_path: "Modules/TrajectoryControl".to_string(),
+        };
+
+        let error = sync_repositories_with_options(&root, &[repository], true).unwrap_err();
+        assert!(error.to_string().contains(
+            "cannot use `--offline` while repository 'TrajectoryControl' is not present locally yet"
+        ));
 
         let _ = fs::remove_dir_all(origin);
         let _ = fs::remove_dir_all(root);

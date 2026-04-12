@@ -81,6 +81,9 @@ When changing CLI behavior, update the help text in `src/main.rs` and verify the
 - Once the user confirms a direct-dependency change, write `wtrproject.toml` before any follow-up network-backed work so interrupted runs can resume with `cpkg sync`.
 - `cpkg add -I` should refresh the package index as soon as the command starts, before rendering the picker, and should reuse that refreshed index for the confirmed selection.
 - Network-backed operations should surface live execution status to the user; prefer a temporary, bounded terminal log panel over silent background work.
+- `cpkg add --offline` and `cpkg sync --offline` should resolve dependencies from the project-local or cached package index without refreshing the remote index.
+- In offline mode, existing submodules should use locally cached repository state only; skip fetch and pull operations.
+- In offline mode, when a newly required repository is not yet registered as a submodule, attempt to register it without fetching repository data; if the installed Git does not support that workflow, report that `--offline` cannot be used for that repository yet.
 
 ### Removal Semantics
 - When `cpkg add -I` only removes packages and adds no new direct dependency, it should:

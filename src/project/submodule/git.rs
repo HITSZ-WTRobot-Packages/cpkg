@@ -56,6 +56,26 @@ pub(super) fn run_git_concurrent(
     Ok(output.stdout.trim().to_string())
 }
 
+fn submodule_add_usage_supports_no_fetch(help_text: &str) -> bool {
+    help_text.lines().map(str::trim).any(|line| {
+        line.contains("git submodule") && line.contains(" add ") && line.contains("--no-fetch")
+    })
+}
+
+pub(super) fn supports_offline_submodule_add() -> Result<bool> {
+    let output = Command::new("git")
+        .args(["submodule", "add", "-h"])
+        .output()
+        .context("failed to inspect `git submodule add` help output")?;
+
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(submodule_add_usage_supports_no_fetch(&combined))
+}
+
 pub(super) fn ensure_git_repository_root(root: &Path) -> Result<()> {
     let toplevel = run_git(
         root,
@@ -490,4 +510,22 @@ pub(super) fn remove_stale_submodule_git_dir(root: &Path, rel_path: &str) -> Res
         git_dir.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::submodule_add_usage_supports_no_fetch;
+
+    #[test]
+    fn submodule_add_usage_detection_ignores_update_only_no_fetch_flag() {
+        let help = "usage: git submodule [--quiet] add [-b <branch>] [--] <repository> [<path>]\n\
+                    or: git submodule [--quiet] update [--init] [-N|--no-fetch] [--] [<path>...]";
+        assert!(!submodule_add_usage_supports_no_fetch(help));
+    }
+
+    #[test]
+    fn submodule_add_usage_detection_accepts_add_specific_no_fetch_flag() {
+        let help = "usage: git submodule [--quiet] add [--no-fetch] [-b <branch>] [--] <repository> [<path>]";
+        assert!(submodule_add_usage_supports_no_fetch(help));
+    }
 }

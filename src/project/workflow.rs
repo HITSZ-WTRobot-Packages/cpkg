@@ -25,6 +25,7 @@ pub struct SyncSummary {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SyncOptions {
     pub submodule_protocol: SubmoduleProtocol,
+    pub offline: bool,
 }
 
 fn resolve_project(
@@ -37,6 +38,18 @@ fn resolve_project(
         &manifest.dependencies.packages,
         options.submodule_protocol,
     )
+}
+
+fn load_index_for_sync(
+    root: &Path,
+    manifest: &WtrProject,
+    options: SyncOptions,
+) -> Result<index::PackageIndex> {
+    if options.offline {
+        index::load_for_project_without_refresh(root, manifest)
+    } else {
+        index::load_for_project(root, manifest)
+    }
 }
 
 fn empty_resolved_project() -> ResolvedProject {
@@ -73,10 +86,11 @@ fn finish_sync(
     root: &Path,
     manifest: &WtrProject,
     resolved: &ResolvedProject,
+    options: SyncOptions,
 ) -> Result<SyncSummary> {
     let previous_repositories = integration::read_managed_repositories(root)?;
     validate_stm32_project(root, manifest)?;
-    submodule::sync_repositories(root, &resolved.repositories)?;
+    submodule::sync_repositories_with_options(root, &resolved.repositories, options.offline)?;
     let integration_file = integration::write_integration_file(root, resolved)?;
     submodule::remove_unused_repositories(root, &previous_repositories, &resolved.repositories)?;
 
@@ -120,9 +134,9 @@ fn add_then_sync(root: &Path, packages: &[String], options: SyncOptions) -> Resu
                 .extend(packages.iter().cloned());
         },
         |manifest| {
-            let index = index::load_for_project(root, manifest)?;
+            let index = load_index_for_sync(root, manifest, options)?;
             let resolved = resolve_project(manifest, &index, options)?;
-            finish_sync(root, manifest, &resolved).map(|_| ())
+            finish_sync(root, manifest, &resolved, options).map(|_| ())
         },
         is_dependency_validation_error,
     )
@@ -145,7 +159,7 @@ pub(crate) fn apply_interactive_selection(
     if summary.added.is_empty() {
         refresh_project_links(root, &updated_manifest, options)?;
     } else {
-        finish_sync(root, &updated_manifest, &resolved)?;
+        finish_sync(root, &updated_manifest, &resolved, options)?;
     }
 
     Ok((load(root)?, summary))
@@ -155,9 +169,9 @@ pub fn sync(root: &Path, options: SyncOptions) -> Result<SyncSummary> {
     let manifest = load(root)?;
     validate_stm32_project(root, &manifest)?;
 
-    let index = index::load_for_project(root, &manifest)?;
+    let index = load_index_for_sync(root, &manifest, options)?;
     let resolved = resolve_project(&manifest, &index, options)?;
-    finish_sync(root, &manifest, &resolved)
+    finish_sync(root, &manifest, &resolved, options)
 }
 
 pub fn add_and_sync(root: &Path, packages: &[String], options: SyncOptions) -> Result<WtrProject> {
@@ -218,7 +232,7 @@ pub fn add_interactive(
 ) -> Result<WtrProject> {
     let manifest = load(root)?;
     let previous_packages = manifest.dependencies.packages.clone();
-    let index = index::load_for_project(root, &manifest)?;
+    let index = load_index_for_sync(root, &manifest, options)?;
     let initially_selected_packages =
         merge_requested_packages(&manifest.dependencies.packages, explicit_packages);
     let interactive_packages = match interactive::select_dependencies_with_initial_selection(

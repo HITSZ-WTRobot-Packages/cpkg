@@ -24,8 +24,10 @@ individual driver-package metadata with `cpkg.toml`.",
 cpkg init --ioc MyBoard.ioc\n  \
 cpkg init -I\n  \
 cpkg add MotorDrivers::DJI bsp::CANDriver\n  \
+cpkg add --offline MotorDrivers::DJI\n  \
 cpkg add -I --submodule-protocol https\n  \
 cpkg sync --submodule-protocol ssh\n  \
+cpkg sync --offline\n  \
 cpkg package init MotorDrivers::DJI --deps bsp::CANDriver"
 )]
 struct Cli {
@@ -81,6 +83,7 @@ struct ProjectInitArgs {
     after_help = "Examples:\n  \
 cpkg add MotorDrivers::DJI\n  \
 cpkg add MotorDrivers::DJI bsp::CANDriver --submodule-protocol ssh\n  \
+cpkg add --offline MotorDrivers::DJI\n  \
 cpkg add -I --submodule-protocol https\n  \
 cpkg add -I MotorDrivers::DJI"
 )]
@@ -115,7 +118,8 @@ struct RemoveArgs {
     about = "Synchronize `Modules/` submodules and regenerate CMake integration",
     after_help = "Examples:\n  \
 cpkg sync\n  \
-cpkg sync --submodule-protocol https\n\n\
+cpkg sync --submodule-protocol https\n  \
+cpkg sync --offline\n\n\
 This command generates `cmake/wtr_modules.cmake`; include it from the root `CMakeLists.txt` \
 and call `wtr_link_packages(<target>)` or `wtr_link_packages_public(<target>)`."
 )]
@@ -130,6 +134,9 @@ struct SyncOptionArgs {
     /// Protocol used when adding or updating Git submodule remotes.
     #[arg(long, value_enum, default_value_t = SubmoduleProtocolArg::Ssh)]
     submodule_protocol: SubmoduleProtocolArg,
+    /// Use the project-local or cached package index and skip Git fetch/pull operations.
+    #[arg(long)]
+    offline: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -153,6 +160,7 @@ impl From<SyncOptionArgs> for SyncOptions {
     fn from(value: SyncOptionArgs) -> Self {
         SyncOptions {
             submodule_protocol: value.submodule_protocol.into(),
+            offline: value.offline,
         }
     }
 }
@@ -224,4 +232,33 @@ pub fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Commands};
+    use clap::Parser;
+
+    #[test]
+    fn add_accepts_offline_sync_option() {
+        let cli = Cli::try_parse_from(["cpkg", "add", "--offline", "MotorDrivers::DJI"]).unwrap();
+
+        match cli.command {
+            Commands::Add(args) => {
+                assert!(args.sync.offline);
+                assert_eq!(args.packages, vec!["MotorDrivers::DJI"]);
+            }
+            _ => panic!("expected add command"),
+        }
+    }
+
+    #[test]
+    fn sync_accepts_offline_sync_option() {
+        let cli = Cli::try_parse_from(["cpkg", "sync", "--offline"]).unwrap();
+
+        match cli.command {
+            Commands::Sync(args) => assert!(args.sync.offline),
+            _ => panic!("expected sync command"),
+        }
+    }
 }
