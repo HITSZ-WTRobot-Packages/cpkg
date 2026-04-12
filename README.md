@@ -19,82 +19,49 @@
 
 ## 安装
 
-### 方式一：从 Release 安装
+`cpkg` 是终端工具，不是图形界面程序；不过对 Windows 用户，安装步骤尽量可以通过图形界面完成。
 
-适合不想本地安装 Rust 工具链的用户。
+README 不提供 Linux 安装帮助。Linux 用户如需使用，请按自己的环境自行准备 Rust / Cargo 并构建。
 
-#### Linux
+### Windows：从 Release 安装
 
-1. 从仓库的 Release 页面下载 `cpkg-<version>-x86_64-unknown-linux-gnu.tar.gz`
-2. 解压：
+适合只想直接使用 `cpkg.exe` 的用户。
 
-   ```bash
-   tar -xzf cpkg-<version>-x86_64-unknown-linux-gnu.tar.gz
-   ```
-
-3. 复制到你的 PATH 目录，例如：
-
-   ```bash
-   install -Dm755 cpkg-<version>-x86_64-unknown-linux-gnu/cpkg ~/.local/bin/cpkg
-   ```
-
-4. 验证：
-
-   ```bash
-   cpkg --version
-   ```
-
-#### Windows
-
-`cpkg` 是终端工具，不是图形界面程序。Windows 用户请在 **Windows Terminal**、PowerShell 或 `cmd` 中使用它。
-
-1. 从仓库的 Release 页面下载 `cpkg-<version>-x86_64-pc-windows-msvc.zip`
-2. 打开 **PowerShell**，解压到自己的工具目录，例如：
-
-   ```powershell
-   $version = "v0.2.0"
-   $installRoot = "$env:USERPROFILE\Tools"
-   Expand-Archive ".\cpkg-$version-x86_64-pc-windows-msvc.zip" -DestinationPath $installRoot -Force
-   $cpkgDir = Join-Path $installRoot "cpkg-$version-x86_64-pc-windows-msvc"
-   ```
-
-3. 将目录加入当前用户的 `Path`：
-
-   ```powershell
-   $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-   [Environment]::SetEnvironmentVariable("Path", "$userPath;$cpkgDir", "User")
-   ```
-
-4. 关闭并重新打开终端，然后验证：
+1. 打开仓库 Release 页面，下载 `cpkg-<version>-x86_64-pc-windows-msvc.zip`
+2. 在资源管理器中右键压缩包，选择“全部解压”，解压到一个你自己容易找到的位置，例如 `C:\Tools\cpkg`
+3. 打开解压后的文件夹，确认其中有 `cpkg.exe`
+4. 如果 Windows 显示文件来自互联网并阻止运行：
+   - 右键 `cpkg.exe`
+   - 打开“属性”
+   - 如果底部有“解除锁定”或类似选项，勾选后点击“确定”
+5. 用图形界面把该目录加入当前用户的 `Path`：
+   - 在开始菜单搜索“编辑账户的环境变量”或“环境变量”
+   - 打开后，在“用户变量”里选中 `Path`
+   - 点击“编辑” → “新建”
+   - 填入 `cpkg.exe` 所在目录，例如 `C:\Tools\cpkg`
+   - 依次点击“确定”保存
+6. 关闭并重新打开 **Windows Terminal**、PowerShell 或 `cmd`，执行：
 
    ```powershell
    cpkg --version
    ```
 
-如果 Windows 拦截了可执行文件，可以执行：
+### 从源码构建
 
-```powershell
-Unblock-File "$cpkgDir\cpkg.exe"
-```
-
-### 方式二：从源码构建
-
-适合开发者或需要最新改动的用户。
+适合已经具备 Rust 开发环境、需要参与开发或想使用最新代码的用户。
 
 ```bash
-git clone <repo-url> cpkg
+git clone https://github.com/HITSZ-WTRobot-Packages/cpkg.git
 cd cpkg
 cargo build --release
 ```
 
-请将 `<repo-url>` 替换为实际仓库地址。
-
 构建完成后，可执行文件位于：
 
-- Linux：`target/release/cpkg`
 - Windows：`target\release\cpkg.exe`
+- 其他平台：对应 `target/release/` 下的 `cpkg`
 
-也可以手动复制到 PATH 目录中使用。
+如果你只是想在 Windows 上安装使用，优先选择上面的 Release 压缩包方式。
 
 ## 依赖与前提
 
@@ -365,7 +332,7 @@ cpkg init --ioc YourProject.ioc
 
 ### 为什么推荐在 Windows Terminal / PowerShell 中使用？
 
-因为 `cpkg` 是纯命令行工具。你需要在终端中执行 `cpkg init`、`cpkg add`、`cpkg sync` 等命令，而不是双击运行。
+因为 `cpkg` 是纯命令行工具。即使安装过程可以主要通过图形界面完成，实际使用时仍需要在终端里执行 `cpkg init`、`cpkg add`、`cpkg sync` 等命令，而不是双击运行。
 
 ## 开发时常用检查
 
