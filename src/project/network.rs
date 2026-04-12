@@ -336,56 +336,30 @@ pub fn run_logged_command_concurrent(
     prefix: &str,
 ) -> Result<LoggedCommandOutput> {
     let command_display = format_command(command);
-    write_concurrent_log_line(&format!("[network][{prefix}] {title}"))?;
-    write_concurrent_log_line(&format!("  [{prefix}] $ {command_display}"))?;
+    write_concurrent_log_line(&format!("[network][{prefix}] started: {title}"))?;
 
-    command.stdin(Stdio::null());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("failed to spawn {title}"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("failed to capture stdout for {title}"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("failed to capture stderr for {title}"))?;
-
-    let (sender, receiver) = mpsc::channel();
-    let stdout_handle = read_stream(stdout, StreamKind::Stdout, sender.clone());
-    let stderr_handle = read_stream(stderr, StreamKind::Stderr, sender);
-
-    for event in receiver {
-        let stream_name = match event.kind {
-            StreamKind::Stdout => "stdout",
-            StreamKind::Stderr => "stderr",
-        };
-        write_concurrent_log_line(&format!("  [{prefix}] {stream_name}> {}", event.line))?;
-    }
-
-    let status = child
-        .wait()
-        .with_context(|| format!("failed to wait for {title}"))?;
-    let stdout = join_reader(stdout_handle, "stdout")?;
-    let stderr = join_reader(stderr_handle, "stderr")?;
+    let output = command
+        .output()
+        .with_context(|| format!("failed to execute {title}"))?;
+    let status = output.status;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
     if status.success() {
-        write_concurrent_log_line(&format!("[network][{prefix}] completed"))?;
+        write_concurrent_log_line(&format!("[network][{prefix}] completed: {title}"))?;
         Ok(LoggedCommandOutput { stdout, stderr })
     } else {
         let message = error_summary(title, status, &stderr, &stdout);
         let _ = write_concurrent_log_line(&format!("[network][{prefix}] failed: {message}"));
+        let _ = write_concurrent_log_line(&format!("  [{prefix}] $ {command_display}"));
         anyhow::bail!("{message}");
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PANEL_MAX_LOG_LINES, display_argument};
+    use super::{PANEL_MAX_LOG_LINES, display_argument, error_summary};
+    use std::process::Command;
 
     #[test]
     fn display_argument_quotes_values_with_spaces() {
@@ -404,5 +378,26 @@ mod tests {
 
         assert_eq!(lines.len(), PANEL_MAX_LOG_LINES);
         assert_eq!(lines.first().unwrap(), "line-2");
+    }
+
+    #[test]
+    fn error_summary_prefers_first_non_empty_stderr_line() {
+        let status = Command::new("git")
+            .args(["rev-parse", "--definitely-invalid-option"])
+            .output()
+            .unwrap()
+            .status;
+
+        let summary = error_summary(
+            "pulling latest main",
+            status,
+            "\nremote rejected update\nextra detail\n",
+            "stdout detail\n",
+        );
+
+        assert_eq!(
+            summary,
+            "pulling latest main failed: remote rejected update"
+        );
     }
 }
