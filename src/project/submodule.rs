@@ -56,6 +56,114 @@ fn ensure_git_repository_root(root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn is_initialized_submodule(path: &Path) -> bool {
+    path.join(".git").exists()
+}
+
+fn current_branch(path: &Path) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .output()
+        .with_context(|| format!("failed to read current branch for '{}'", path.display()))?;
+
+    if output.status.success() {
+        return Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        ));
+    }
+
+    if output.status.code() == Some(1) {
+        return Ok(None);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    anyhow::bail!(
+        "git failed while reading current branch for '{}': {}",
+        path.display(),
+        if stderr.is_empty() {
+            "unknown git error".to_string()
+        } else {
+            stderr
+        }
+    );
+}
+
+fn has_local_branch(path: &Path, branch: &str) -> Result<bool> {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+        .status()
+        .with_context(|| {
+            format!(
+                "failed to check whether branch '{branch}' exists in '{}'",
+                path.display()
+            )
+        })?;
+
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => anyhow::bail!(
+            "git failed while checking branch '{branch}' in '{}'",
+            path.display()
+        ),
+    }
+}
+
+fn ensure_main_checked_out(path: &Path, repository_name: &str) -> Result<()> {
+    if current_branch(path)?.as_deref() == Some("main") {
+        return Ok(());
+    }
+
+    if has_local_branch(path, "main")? {
+        run_git(
+            path,
+            &["checkout", "main"],
+            &format!("checking out main for {repository_name}"),
+            false,
+        )?;
+    } else {
+        run_git(
+            path,
+            &["checkout", "-b", "main", "--track", "origin/main"],
+            &format!("creating main for {repository_name}"),
+            false,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn align_main_to_origin(path: &Path, repository_name: &str) -> Result<()> {
+    run_git(
+        path,
+        &["branch", "-f", "main", "origin/main"],
+        &format!("aligning main to origin/main for {repository_name}"),
+        false,
+    )?;
+    run_git(
+        path,
+        &["checkout", "main"],
+        &format!("checking out main for {repository_name}"),
+        false,
+    )?;
+    run_git(
+        path,
+        &["branch", "--set-upstream-to", "origin/main", "main"],
+        &format!("tracking origin/main for {repository_name}"),
+        false,
+    )?;
+    Ok(())
+}
+
 fn is_registered_submodule(root: &Path, rel_path: &str) -> Result<bool> {
     let gitmodules = root.join(".gitmodules");
     if !gitmodules.exists() {
@@ -151,6 +259,8 @@ fn sync_repository(root: &Path, repository: &ManagedRepository) -> Result<()> {
             &format!("adding submodule {}", repository.name),
             true,
         )?;
+        info!("synchronized submodule {}", repository.name);
+        return Ok(());
     }
 
     run_git(
@@ -173,30 +283,23 @@ fn sync_repository(root: &Path, repository: &ManagedRepository) -> Result<()> {
         &format!("tracking main for {}", repository.name),
         false,
     )?;
-    run_git(
-        root,
-        &["submodule", "update", "--init", "--remote", "--", rel_path],
-        &format!("updating submodule {}", repository.name),
-        true,
-    )?;
 
-    let abs_path_string = abs_path.to_string_lossy().into_owned();
+    if !is_initialized_submodule(&abs_path) {
+        run_git(
+            root,
+            &["submodule", "update", "--init", "--remote", "--", rel_path],
+            &format!("initializing submodule {}", repository.name),
+            true,
+        )?;
+        align_main_to_origin(&abs_path, &repository.name)?;
+        info!("synchronized submodule {}", repository.name);
+        return Ok(());
+    }
+
+    ensure_main_checked_out(&abs_path, &repository.name)?;
     run_git(
-        root,
-        &["-C", &abs_path_string, "checkout", "main"],
-        &format!("checking out main for {}", repository.name),
-        false,
-    )?;
-    run_git(
-        root,
-        &[
-            "-C",
-            &abs_path_string,
-            "pull",
-            "--ff-only",
-            "origin",
-            "main",
-        ],
+        &abs_path,
+        &["pull", "--ff-only", "origin", "main"],
         &format!("pulling latest main for {}", repository.name),
         true,
     )?;
@@ -275,11 +378,15 @@ pub fn remove_unused_repositories(
 
 #[cfg(test)]
 mod tests {
-    use super::{remove_repository, repository_names_to_remove, submodule_git_dir};
+    use super::{
+        current_branch, remove_repository, repository_names_to_remove, submodule_git_dir,
+        sync_repository,
+    };
     use crate::project::resolver::ManagedRepository;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::Once;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn make_temp_dir(prefix: &str) -> PathBuf {
@@ -316,6 +423,29 @@ mod tests {
         run_git(path, &["config", "user.name", "cpkg"]);
     }
 
+    fn allow_file_protocol() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| unsafe {
+            std::env::set_var("GIT_ALLOW_PROTOCOL", "file");
+        });
+    }
+
+    fn commit_file(path: &Path, name: &str, content: &str, message: &str) -> String {
+        fs::write(path.join(name), content).unwrap();
+        run_git(path, &["add", name]);
+        run_git(
+            path,
+            &["-c", "commit.gpgsign=false", "commit", "-m", message],
+        );
+        Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .unwrap()
+    }
+
     #[test]
     fn repository_names_to_remove_keeps_referenced_repositories() {
         let repositories = repository_names_to_remove(
@@ -332,6 +462,8 @@ mod tests {
 
     #[test]
     fn remove_repository_cleans_stale_gitdir_and_allows_readd() {
+        allow_file_protocol();
+
         let origin = make_temp_dir("origin");
         init_repo(&origin);
         fs::write(origin.join("README.md"), "test").unwrap();
@@ -393,6 +525,131 @@ mod tests {
             ],
         );
         assert!(root.join(rel_path).exists());
+
+        let _ = fs::remove_dir_all(origin);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sync_repository_updates_uninitialized_submodule_to_latest_main() {
+        allow_file_protocol();
+
+        let origin = make_temp_dir("origin");
+        init_repo(&origin);
+        commit_file(&origin, "README.md", "v1\n", "init");
+        run_git(&origin, &["branch", "-M", "main"]);
+
+        let root = make_temp_dir("root");
+        init_repo(&root);
+        fs::create_dir_all(root.join("Modules")).unwrap();
+
+        let origin_url = origin
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let rel_path = "Modules/TrajectoryControl";
+        let repository = ManagedRepository {
+            name: "TrajectoryControl".to_string(),
+            url: origin_url,
+            rel_path: rel_path.to_string(),
+        };
+
+        run_git(
+            &root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-b",
+                "main",
+                &repository.url,
+                rel_path,
+            ],
+        );
+
+        let latest_commit = commit_file(&origin, "README.md", "v2\n", "update");
+
+        run_git(&root, &["submodule", "deinit", "-f", "--", rel_path]);
+
+        sync_repository(&root, &repository).unwrap();
+
+        assert_eq!(
+            current_branch(&root.join(rel_path)).unwrap().as_deref(),
+            Some("main")
+        );
+
+        let head = Command::new("git")
+            .arg("-C")
+            .arg(root.join(rel_path))
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .unwrap();
+        assert_eq!(head, latest_commit);
+
+        let _ = fs::remove_dir_all(origin);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sync_repository_switches_detached_submodule_back_to_main_before_pulling() {
+        allow_file_protocol();
+
+        let origin = make_temp_dir("origin");
+        init_repo(&origin);
+        commit_file(&origin, "README.md", "v1\n", "init");
+        run_git(&origin, &["branch", "-M", "main"]);
+
+        let root = make_temp_dir("root");
+        init_repo(&root);
+        fs::create_dir_all(root.join("Modules")).unwrap();
+
+        let origin_url = origin
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let rel_path = "Modules/TrajectoryControl";
+        let repository = ManagedRepository {
+            name: "TrajectoryControl".to_string(),
+            url: origin_url,
+            rel_path: rel_path.to_string(),
+        };
+
+        run_git(
+            &root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-b",
+                "main",
+                &repository.url,
+                rel_path,
+            ],
+        );
+        run_git(&root.join(rel_path), &["checkout", "--detach"]);
+
+        let latest_commit = commit_file(&origin, "README.md", "v2\n", "update");
+
+        sync_repository(&root, &repository).unwrap();
+
+        assert_eq!(
+            current_branch(&root.join(rel_path)).unwrap().as_deref(),
+            Some("main")
+        );
+
+        let head = Command::new("git")
+            .arg("-C")
+            .arg(root.join(rel_path))
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .unwrap();
+        assert_eq!(head, latest_commit);
 
         let _ = fs::remove_dir_all(origin);
         let _ = fs::remove_dir_all(root);
