@@ -3,9 +3,10 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
 use tracing::info;
 
-use super::network::run_logged_command;
+use super::network::{run_logged_command, run_logged_command_concurrent};
 use super::resolver::ManagedRepository;
 
 fn run_git(root: &Path, args: &[&str], description: &str, show_logs: bool) -> Result<String> {
@@ -36,6 +37,19 @@ fn run_git(root: &Path, args: &[&str], description: &str, show_logs: bool) -> Re
 
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
+}
+
+fn run_git_concurrent(
+    root: &Path,
+    args: &[&str],
+    description: &str,
+    prefix: &str,
+) -> Result<String> {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(root).args(args);
+    let output = run_logged_command_concurrent(&mut command, description, prefix)
+        .with_context(|| format!("failed to run git for {description}"))?;
+    Ok(output.stdout.trim().to_string())
 }
 
 fn ensure_git_repository_root(root: &Path) -> Result<()> {
@@ -239,7 +253,64 @@ fn remove_stale_submodule_git_dir(root: &Path, rel_path: &str) -> Result<()> {
     Ok(())
 }
 
-fn sync_repository(root: &Path, repository: &ManagedRepository) -> Result<()> {
+#[derive(Debug, Clone)]
+enum PendingNetworkSync {
+    Initialize {
+        root: PathBuf,
+        repository: ManagedRepository,
+    },
+    Pull {
+        path: PathBuf,
+        repository_name: String,
+    },
+}
+
+impl PendingNetworkSync {
+    fn repository_name(&self) -> &str {
+        match self {
+            Self::Initialize { repository, .. } => &repository.name,
+            Self::Pull {
+                repository_name, ..
+            } => repository_name,
+        }
+    }
+
+    fn execute(self) -> Result<()> {
+        match self {
+            Self::Initialize { root, repository } => {
+                let rel_path = repository.rel_path.as_str();
+                let abs_path = root.join(rel_path);
+                run_git_concurrent(
+                    &root,
+                    &["submodule", "update", "--init", "--remote", "--", rel_path],
+                    &format!("initializing submodule {}", repository.name),
+                    &repository.name,
+                )?;
+                align_main_to_origin(&abs_path, &repository.name)?;
+                info!("synchronized submodule {}", repository.name);
+                Ok(())
+            }
+            Self::Pull {
+                path,
+                repository_name,
+            } => {
+                run_git_concurrent(
+                    &path,
+                    &["pull", "--ff-only", "origin", "main"],
+                    &format!("pulling latest main for {repository_name}"),
+                    &repository_name,
+                )?;
+                info!("synchronized submodule {}", repository_name);
+                Ok(())
+            }
+        }
+    }
+}
+
+fn prepare_repository_sync(
+    root: &Path,
+    repository: &ManagedRepository,
+) -> Result<Option<PendingNetworkSync>> {
     let rel_path = repository.rel_path.as_str();
     let abs_path = root.join(rel_path);
     let registered = is_registered_submodule(root, rel_path)?;
@@ -260,7 +331,7 @@ fn sync_repository(root: &Path, repository: &ManagedRepository) -> Result<()> {
             true,
         )?;
         info!("synchronized submodule {}", repository.name);
-        return Ok(());
+        return Ok(None);
     }
 
     run_git(
@@ -285,27 +356,59 @@ fn sync_repository(root: &Path, repository: &ManagedRepository) -> Result<()> {
     )?;
 
     if !is_initialized_submodule(&abs_path) {
-        run_git(
-            root,
-            &["submodule", "update", "--init", "--remote", "--", rel_path],
-            &format!("initializing submodule {}", repository.name),
-            true,
-        )?;
-        align_main_to_origin(&abs_path, &repository.name)?;
-        info!("synchronized submodule {}", repository.name);
-        return Ok(());
+        return Ok(Some(PendingNetworkSync::Initialize {
+            root: root.to_path_buf(),
+            repository: repository.clone(),
+        }));
     }
 
     ensure_main_checked_out(&abs_path, &repository.name)?;
-    run_git(
-        &abs_path,
-        &["pull", "--ff-only", "origin", "main"],
-        &format!("pulling latest main for {}", repository.name),
-        true,
-    )?;
+    Ok(Some(PendingNetworkSync::Pull {
+        path: abs_path,
+        repository_name: repository.name.clone(),
+    }))
+}
 
-    info!("synchronized submodule {}", repository.name);
-    Ok(())
+fn execute_network_syncs(syncs: Vec<PendingNetworkSync>) -> Result<()> {
+    if syncs.is_empty() {
+        return Ok(());
+    }
+
+    if syncs.len() == 1 {
+        return syncs.into_iter().next().unwrap().execute();
+    }
+
+    info!("synchronizing {} submodules in parallel", syncs.len());
+
+    let mut errors = Vec::new();
+    thread::scope(|scope| {
+        let handles = syncs
+            .into_iter()
+            .map(|sync| {
+                let repository_name = sync.repository_name().to_string();
+                let handle = scope.spawn(move || sync.execute());
+                (repository_name, handle)
+            })
+            .collect::<Vec<_>>();
+
+        for (repository_name, handle) in handles {
+            match handle.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => errors.push(format!("{repository_name}: {error:#}")),
+                Err(_) => errors.push(format!("{repository_name}: sync worker panicked")),
+            }
+        }
+    });
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "failed to synchronize {} submodule(s): {}",
+            errors.len(),
+            errors.join("; ")
+        );
+    }
 }
 
 fn repository_names_to_remove(
@@ -351,9 +454,13 @@ pub fn sync_repositories(root: &Path, repositories: &[ManagedRepository]) -> Res
     ensure_git_repository_root(root)?;
     fs::create_dir_all(root.join("Modules")).context("failed to create Modules directory")?;
 
+    let mut pending_syncs = Vec::new();
     for repository in repositories {
-        sync_repository(root, repository)?;
+        if let Some(sync) = prepare_repository_sync(root, repository)? {
+            pending_syncs.push(sync);
+        }
     }
+    execute_network_syncs(pending_syncs)?;
 
     Ok(())
 }
@@ -380,7 +487,7 @@ pub fn remove_unused_repositories(
 mod tests {
     use super::{
         current_branch, remove_repository, repository_names_to_remove, submodule_git_dir,
-        sync_repository,
+        sync_repositories,
     };
     use crate::project::resolver::ManagedRepository;
     use std::fs;
@@ -437,6 +544,16 @@ mod tests {
             path,
             &["-c", "commit.gpgsign=false", "commit", "-m", message],
         );
+        Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .unwrap()
+    }
+
+    fn head_commit(path: &Path) -> String {
         Command::new("git")
             .arg("-C")
             .arg(path)
@@ -573,20 +690,14 @@ mod tests {
 
         run_git(&root, &["submodule", "deinit", "-f", "--", rel_path]);
 
-        sync_repository(&root, &repository).unwrap();
+        sync_repositories(&root, &[repository]).unwrap();
 
         assert_eq!(
             current_branch(&root.join(rel_path)).unwrap().as_deref(),
             Some("main")
         );
 
-        let head = Command::new("git")
-            .arg("-C")
-            .arg(root.join(rel_path))
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-            .unwrap();
+        let head = head_commit(&root.join(rel_path));
         assert_eq!(head, latest_commit);
 
         let _ = fs::remove_dir_all(origin);
@@ -635,23 +746,98 @@ mod tests {
 
         let latest_commit = commit_file(&origin, "README.md", "v2\n", "update");
 
-        sync_repository(&root, &repository).unwrap();
+        sync_repositories(&root, &[repository]).unwrap();
 
         assert_eq!(
             current_branch(&root.join(rel_path)).unwrap().as_deref(),
             Some("main")
         );
 
-        let head = Command::new("git")
-            .arg("-C")
-            .arg(root.join(rel_path))
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-            .unwrap();
+        let head = head_commit(&root.join(rel_path));
         assert_eq!(head, latest_commit);
 
         let _ = fs::remove_dir_all(origin);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sync_repositories_updates_registered_submodules_together() {
+        allow_file_protocol();
+
+        let origin_a = make_temp_dir("origin-a");
+        let origin_b = make_temp_dir("origin-b");
+        init_repo(&origin_a);
+        init_repo(&origin_b);
+        commit_file(&origin_a, "README.md", "a1\n", "init");
+        commit_file(&origin_b, "README.md", "b1\n", "init");
+        run_git(&origin_a, &["branch", "-M", "main"]);
+        run_git(&origin_b, &["branch", "-M", "main"]);
+
+        let root = make_temp_dir("root");
+        init_repo(&root);
+        fs::create_dir_all(root.join("Modules")).unwrap();
+
+        let repository_a = ManagedRepository {
+            name: "TrajectoryControl".to_string(),
+            url: origin_a
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            rel_path: "Modules/TrajectoryControl".to_string(),
+        };
+        let repository_b = ManagedRepository {
+            name: "BasicComponents".to_string(),
+            url: origin_b
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            rel_path: "Modules/BasicComponents".to_string(),
+        };
+
+        for repository in [&repository_a, &repository_b] {
+            run_git(
+                &root,
+                &[
+                    "-c",
+                    "protocol.file.allow=always",
+                    "submodule",
+                    "add",
+                    "-b",
+                    "main",
+                    &repository.url,
+                    &repository.rel_path,
+                ],
+            );
+        }
+
+        let latest_a = commit_file(&origin_a, "README.md", "a2\n", "update");
+        let latest_b = commit_file(&origin_b, "README.md", "b2\n", "update");
+        run_git(
+            &root,
+            &["submodule", "deinit", "-f", "--", &repository_b.rel_path],
+        );
+
+        sync_repositories(&root, &[repository_a.clone(), repository_b.clone()]).unwrap();
+
+        assert_eq!(
+            current_branch(&root.join(&repository_a.rel_path))
+                .unwrap()
+                .as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            current_branch(&root.join(&repository_b.rel_path))
+                .unwrap()
+                .as_deref(),
+            Some("main")
+        );
+        assert_eq!(head_commit(&root.join(&repository_a.rel_path)), latest_a);
+        assert_eq!(head_commit(&root.join(&repository_b.rel_path)), latest_b);
+
+        let _ = fs::remove_dir_all(origin_a);
+        let _ = fs::remove_dir_all(origin_b);
         let _ = fs::remove_dir_all(root);
     }
 }

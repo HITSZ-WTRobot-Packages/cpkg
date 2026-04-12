@@ -3,7 +3,7 @@ use console::{Term, style};
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::mpsc;
+use std::sync::{Mutex, OnceLock, mpsc};
 use std::thread;
 
 const PANEL_MAX_LOG_LINES: usize = 6;
@@ -267,6 +267,19 @@ fn error_summary(description: &str, status: ExitStatus, stderr: &str, stdout: &s
     format!("{description} failed: {details}")
 }
 
+fn concurrent_output_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn write_concurrent_log_line(line: &str) -> Result<()> {
+    let _guard = concurrent_output_lock()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("network log lock poisoned"))?;
+    Term::stderr().write_line(line)?;
+    Ok(())
+}
+
 pub fn run_logged_command(command: &mut Command, title: &str) -> Result<LoggedCommandOutput> {
     let command_display = format_command(command);
     let mut panel = TransientLogPanel::new(title, &command_display)?;
@@ -313,6 +326,59 @@ pub fn run_logged_command(command: &mut Command, title: &str) -> Result<LoggedCo
     } else {
         let message = error_summary(title, status, &stderr, &stdout);
         let _ = panel.finish_failure(&message);
+        anyhow::bail!("{message}");
+    }
+}
+
+pub fn run_logged_command_concurrent(
+    command: &mut Command,
+    title: &str,
+    prefix: &str,
+) -> Result<LoggedCommandOutput> {
+    let command_display = format_command(command);
+    write_concurrent_log_line(&format!("[network][{prefix}] {title}"))?;
+    write_concurrent_log_line(&format!("  [{prefix}] $ {command_display}"))?;
+
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("failed to spawn {title}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("failed to capture stdout for {title}"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("failed to capture stderr for {title}"))?;
+
+    let (sender, receiver) = mpsc::channel();
+    let stdout_handle = read_stream(stdout, StreamKind::Stdout, sender.clone());
+    let stderr_handle = read_stream(stderr, StreamKind::Stderr, sender);
+
+    for event in receiver {
+        let stream_name = match event.kind {
+            StreamKind::Stdout => "stdout",
+            StreamKind::Stderr => "stderr",
+        };
+        write_concurrent_log_line(&format!("  [{prefix}] {stream_name}> {}", event.line))?;
+    }
+
+    let status = child
+        .wait()
+        .with_context(|| format!("failed to wait for {title}"))?;
+    let stdout = join_reader(stdout_handle, "stdout")?;
+    let stderr = join_reader(stderr_handle, "stderr")?;
+
+    if status.success() {
+        write_concurrent_log_line(&format!("[network][{prefix}] completed"))?;
+        Ok(LoggedCommandOutput { stdout, stderr })
+    } else {
+        let message = error_summary(title, status, &stderr, &stdout);
+        let _ = write_concurrent_log_line(&format!("[network][{prefix}] failed: {message}"));
         anyhow::bail!("{message}");
     }
 }
