@@ -281,6 +281,95 @@ mod tests {
     }
 
     #[test]
+    fn remove_repository_succeeds_when_gitmodules_has_unstaged_changes() {
+        allow_file_protocol();
+
+        let origin_keep = make_temp_dir("origin-keep");
+        let origin_remove = make_temp_dir("origin-remove");
+        init_repo(&origin_keep);
+        init_repo(&origin_remove);
+        fs::write(origin_keep.join("README.md"), "keep").unwrap();
+        fs::write(origin_remove.join("README.md"), "remove").unwrap();
+        run_git(&origin_keep, &["add", "README.md"]);
+        run_git(&origin_remove, &["add", "README.md"]);
+        run_git(
+            &origin_keep,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        );
+        run_git(
+            &origin_remove,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        );
+        run_git(&origin_keep, &["branch", "-M", "main"]);
+        run_git(&origin_remove, &["branch", "-M", "main"]);
+
+        let root = make_temp_dir("root");
+        init_repo(&root);
+        fs::create_dir_all(root.join("Modules")).unwrap();
+
+        let keep_url = origin_keep
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let remove_url = origin_remove
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let keep_path = "Modules/BasicComponents";
+        let remove_path = "Modules/Sensors";
+
+        run_git(
+            &root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-b",
+                "main",
+                &keep_url,
+                keep_path,
+            ],
+        );
+        run_git(
+            &root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-b",
+                "main",
+                &remove_url,
+                remove_path,
+            ],
+        );
+
+        run_git(
+            &root,
+            &[
+                "submodule",
+                "set-url",
+                "--",
+                keep_path,
+                "git@example.com:BasicComponents.git",
+            ],
+        );
+
+        remove_repository(&root, "Sensors").unwrap();
+
+        assert!(gitmodules_contains_path(&root, keep_path));
+        assert!(!gitmodules_contains_path(&root, remove_path));
+        assert!(!root.join(remove_path).exists());
+
+        let _ = fs::remove_dir_all(origin_keep);
+        let _ = fs::remove_dir_all(origin_remove);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn remove_unused_repositories_uses_gitmodules_when_generated_state_is_stale() {
         allow_file_protocol();
 

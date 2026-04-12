@@ -1,5 +1,6 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::Path;
 use tracing::info;
 
@@ -41,10 +42,20 @@ pub(super) fn remove_repository(root: &Path, repository_name: &str) -> Result<()
         )?;
         run_git(
             root,
-            &["rm", "-f", "--", &rel_path],
-            &format!("removing submodule {repository_name}"),
+            &["update-index", "--force-remove", "--", &rel_path],
+            &format!("removing git index entry for submodule {repository_name}"),
             false,
         )?;
+
+        let abs_path = root.join(&rel_path);
+        if abs_path.exists() {
+            fs::remove_dir_all(&abs_path).with_context(|| {
+                format!(
+                    "failed to remove submodule working tree '{}'",
+                    abs_path.display()
+                )
+            })?;
+        }
     }
 
     if registered {

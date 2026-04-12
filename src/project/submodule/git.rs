@@ -293,16 +293,6 @@ pub(super) fn remove_submodule_registration(root: &Path, rel_path: &str) -> Resu
         false,
     )?;
 
-    let gitmodules = root.join(".gitmodules");
-    if gitmodules.exists() {
-        let content =
-            fs::read_to_string(&gitmodules).context("failed to read .gitmodules after cleanup")?;
-        if content.trim().is_empty() {
-            fs::remove_file(&gitmodules)
-                .context("failed to remove empty .gitmodules after cleanup")?;
-        }
-    }
-
     Ok(true)
 }
 
