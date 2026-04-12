@@ -6,6 +6,7 @@ use std::process::Command;
 use tracing::info;
 
 use crate::project::network::{run_logged_command, run_logged_command_concurrent};
+use crate::project::resolver::ManagedRepository;
 
 pub(super) fn run_git(
     root: &Path,
@@ -244,11 +245,139 @@ fn registered_submodules(root: &Path) -> Result<Vec<RegisteredSubmodule>> {
         .collect()
 }
 
+fn tracked_submodule_paths(root: &Path) -> Result<Vec<String>> {
+    if !root.join(".git").exists() {
+        return Ok(Vec::new());
+    }
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "--stage"])
+        .output()
+        .context("failed to inspect tracked submodules from git index")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!(
+            "failed to inspect tracked submodules from git index: {}",
+            if stderr.is_empty() {
+                "unknown git error".to_string()
+            } else {
+                stderr
+            }
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let mode = parts.next()?;
+            if mode != "160000" {
+                return None;
+            }
+            let _object = parts.next()?;
+            let _stage = parts.next()?;
+            parts.next().map(|path| path.to_string())
+        })
+        .collect())
+}
+
+fn write_gitmodules_entry(root: &Path, repository: &ManagedRepository) -> Result<()> {
+    let section = format!("submodule.{}", repository.name);
+
+    run_git(
+        root,
+        &[
+            "config",
+            "--file",
+            ".gitmodules",
+            &format!("{section}.path"),
+            &repository.rel_path,
+        ],
+        &format!("restoring .gitmodules path for {}", repository.name),
+        false,
+    )?;
+    run_git(
+        root,
+        &[
+            "config",
+            "--file",
+            ".gitmodules",
+            &format!("{section}.url"),
+            &repository.url,
+        ],
+        &format!("restoring .gitmodules url for {}", repository.name),
+        false,
+    )?;
+    run_git(
+        root,
+        &[
+            "config",
+            "--file",
+            ".gitmodules",
+            &format!("{section}.branch"),
+            "main",
+        ],
+        &format!("restoring .gitmodules branch for {}", repository.name),
+        false,
+    )?;
+
+    Ok(())
+}
+
+pub(super) fn repair_gitmodules_if_needed(
+    root: &Path,
+    desired_repositories: &[ManagedRepository],
+) -> Result<()> {
+    if !root.join(".git").exists() {
+        return Ok(());
+    }
+
+    if registered_submodules(root).is_ok() {
+        return Ok(());
+    }
+
+    info!("detected invalid .gitmodules; rebuilding managed submodule entries");
+    fs::write(root.join(".gitmodules"), "").context("failed to reset broken .gitmodules")?;
+
+    for repository in desired_repositories {
+        if has_git_index_entry(root, &repository.rel_path)? {
+            write_gitmodules_entry(root, repository)?;
+        }
+    }
+
+    Ok(())
+}
+
 pub(super) fn managed_repository_names_from_gitmodules(root: &Path) -> Result<Vec<String>> {
     let mut repositories = BTreeSet::new();
 
     for submodule in registered_submodules(root)? {
         let mut components = Path::new(&submodule.path).components();
+        let Some(prefix) = components.next() else {
+            continue;
+        };
+        let Some(repository_name) = components.next() else {
+            continue;
+        };
+        if prefix.as_os_str() != "Modules" || components.next().is_some() {
+            continue;
+        }
+
+        repositories.insert(repository_name.as_os_str().to_string_lossy().into_owned());
+    }
+
+    Ok(repositories.into_iter().collect())
+}
+
+pub(super) fn tracked_repository_names_from_git_index(root: &Path) -> Result<Vec<String>> {
+    let mut repositories = BTreeSet::new();
+
+    for path in tracked_submodule_paths(root)? {
+        let mut components = Path::new(&path).components();
         let Some(prefix) = components.next() else {
             continue;
         };

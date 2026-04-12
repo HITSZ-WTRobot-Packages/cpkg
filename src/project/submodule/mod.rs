@@ -8,13 +8,17 @@ use std::fs;
 use std::path::Path;
 
 use self::cleanup::{remove_repository, repository_names_to_remove};
-use self::git::{ensure_git_repository_root, managed_repository_names_from_gitmodules};
+use self::git::{
+    ensure_git_repository_root, managed_repository_names_from_gitmodules,
+    repair_gitmodules_if_needed, tracked_repository_names_from_git_index,
+};
 use self::sync::{execute_network_syncs, prepare_repository_sync};
 use super::resolver::ManagedRepository;
 
 pub fn sync_repositories(root: &Path, repositories: &[ManagedRepository]) -> Result<()> {
     ensure_git_repository_root(root)?;
     fs::create_dir_all(root.join("Modules")).context("failed to create Modules directory")?;
+    repair_gitmodules_if_needed(root, repositories)?;
 
     let mut pending_syncs = Vec::new();
     for repository in repositories {
@@ -32,10 +36,12 @@ pub fn remove_unused_repositories(
     current_repositories: &[String],
     desired_repositories: &[ManagedRepository],
 ) -> Result<()> {
+    repair_gitmodules_if_needed(root, desired_repositories)?;
     let current_repositories = current_repositories
         .iter()
         .cloned()
         .chain(managed_repository_names_from_gitmodules(root)?)
+        .chain(tracked_repository_names_from_git_index(root)?)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
@@ -138,6 +144,10 @@ mod tests {
             && fs::read_to_string(gitmodules)
                 .map(|content| content.contains(rel_path))
                 .unwrap_or(false)
+    }
+
+    fn write_broken_gitmodules(root: &Path) {
+        fs::write(root.join(".gitmodules"), "<<<<<<< ours\n").unwrap();
     }
 
     #[test]
@@ -413,6 +423,108 @@ mod tests {
         assert!(!root.join(rel_path).exists());
         assert!(!gitmodules_contains_path(&root, rel_path));
         assert!(!is_registered_submodule(&root, rel_path).unwrap());
+
+        let _ = fs::remove_dir_all(origin);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sync_repositories_recovers_from_broken_gitmodules() {
+        allow_file_protocol();
+
+        let origin = make_temp_dir("origin");
+        init_repo(&origin);
+        fs::write(origin.join("README.md"), "test").unwrap();
+        run_git(&origin, &["add", "README.md"]);
+        run_git(
+            &origin,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        );
+        run_git(&origin, &["branch", "-M", "main"]);
+
+        let root = make_temp_dir("root");
+        init_repo(&root);
+        fs::create_dir_all(root.join("Modules")).unwrap();
+
+        let origin_url = origin
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let rel_path = "Modules/TrajectoryControl";
+        let repository = ManagedRepository {
+            name: "TrajectoryControl".to_string(),
+            url: origin_url.clone(),
+            rel_path: rel_path.to_string(),
+        };
+
+        run_git(
+            &root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-b",
+                "main",
+                &origin_url,
+                rel_path,
+            ],
+        );
+
+        write_broken_gitmodules(&root);
+        sync_repositories(&root, &[repository]).unwrap();
+
+        assert!(gitmodules_contains_path(&root, rel_path));
+        assert!(is_registered_submodule(&root, rel_path).unwrap());
+
+        let _ = fs::remove_dir_all(origin);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remove_unused_repositories_recovers_from_broken_gitmodules_without_generated_state() {
+        allow_file_protocol();
+
+        let origin = make_temp_dir("origin");
+        init_repo(&origin);
+        fs::write(origin.join("README.md"), "test").unwrap();
+        run_git(&origin, &["add", "README.md"]);
+        run_git(
+            &origin,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        );
+        run_git(&origin, &["branch", "-M", "main"]);
+
+        let root = make_temp_dir("root");
+        init_repo(&root);
+        fs::create_dir_all(root.join("Modules")).unwrap();
+
+        let origin_url = origin
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let rel_path = "Modules/Sensors";
+
+        run_git(
+            &root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-b",
+                "main",
+                &origin_url,
+                rel_path,
+            ],
+        );
+
+        write_broken_gitmodules(&root);
+        remove_unused_repositories(&root, &[], &Vec::<ManagedRepository>::new()).unwrap();
+
+        assert!(!root.join(rel_path).exists());
 
         let _ = fs::remove_dir_all(origin);
         let _ = fs::remove_dir_all(root);
