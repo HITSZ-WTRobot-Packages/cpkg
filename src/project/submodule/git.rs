@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -180,10 +181,16 @@ pub(super) fn align_main_to_origin(path: &Path, repository_name: &str) -> Result
     Ok(())
 }
 
-pub(super) fn is_registered_submodule(root: &Path, rel_path: &str) -> Result<bool> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegisteredSubmodule {
+    section: String,
+    path: String,
+}
+
+fn registered_submodules(root: &Path) -> Result<Vec<RegisteredSubmodule>> {
     let gitmodules = root.join(".gitmodules");
     if !gitmodules.exists() {
-        return Ok(false);
+        return Ok(Vec::new());
     }
 
     let output = Command::new("git")
@@ -199,17 +206,128 @@ pub(super) fn is_registered_submodule(root: &Path, rel_path: &str) -> Result<boo
         .output()
         .context("failed to inspect .gitmodules")?;
 
-    if !output.status.success() && output.stdout.is_empty() {
-        return Ok(false);
+    if !output.status.success() {
+        if output.status.code() == Some(1) && output.stdout.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!(
+            "failed to inspect .gitmodules: {}",
+            if stderr.is_empty() {
+                "unknown git error".to_string()
+            } else {
+                stderr
+            }
+        );
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout.lines().any(|line| {
-        line.split_whitespace()
-            .nth(1)
-            .map(|value| value == rel_path)
-            .unwrap_or(false)
-    }))
+    stdout
+        .lines()
+        .map(|line| {
+            let mut parts = line.split_whitespace();
+            let key = parts
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("failed to parse .gitmodules key from '{line}'"))?;
+            let path = parts
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("failed to parse .gitmodules path from '{line}'"))?;
+            let section = key
+                .strip_suffix(".path")
+                .ok_or_else(|| anyhow::anyhow!("unexpected .gitmodules key '{key}'"))?;
+            Ok(RegisteredSubmodule {
+                section: section.to_string(),
+                path: path.to_string(),
+            })
+        })
+        .collect()
+}
+
+pub(super) fn managed_repository_names_from_gitmodules(root: &Path) -> Result<Vec<String>> {
+    let mut repositories = BTreeSet::new();
+
+    for submodule in registered_submodules(root)? {
+        let mut components = Path::new(&submodule.path).components();
+        let Some(prefix) = components.next() else {
+            continue;
+        };
+        let Some(repository_name) = components.next() else {
+            continue;
+        };
+        if prefix.as_os_str() != "Modules" || components.next().is_some() {
+            continue;
+        }
+
+        repositories.insert(repository_name.as_os_str().to_string_lossy().into_owned());
+    }
+
+    Ok(repositories.into_iter().collect())
+}
+
+pub(super) fn is_registered_submodule(root: &Path, rel_path: &str) -> Result<bool> {
+    Ok(registered_submodules(root)?
+        .iter()
+        .any(|submodule| submodule.path == rel_path))
+}
+
+pub(super) fn remove_submodule_registration(root: &Path, rel_path: &str) -> Result<bool> {
+    let Some(section) = registered_submodules(root)?
+        .into_iter()
+        .find(|submodule| submodule.path == rel_path)
+        .map(|submodule| submodule.section)
+    else {
+        return Ok(false);
+    };
+
+    run_git(
+        root,
+        &[
+            "config",
+            "--file",
+            ".gitmodules",
+            "--remove-section",
+            &section,
+        ],
+        &format!("removing .gitmodules entry for {rel_path}"),
+        false,
+    )?;
+
+    let gitmodules = root.join(".gitmodules");
+    if gitmodules.exists() {
+        let content =
+            fs::read_to_string(&gitmodules).context("failed to read .gitmodules after cleanup")?;
+        if content.trim().is_empty() {
+            fs::remove_file(&gitmodules)
+                .context("failed to remove empty .gitmodules after cleanup")?;
+        }
+    }
+
+    Ok(true)
+}
+
+pub(super) fn has_git_index_entry(root: &Path, rel_path: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "--stage", "--", rel_path])
+        .output()
+        .with_context(|| format!("failed to inspect git index entry for '{rel_path}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!(
+            "failed to inspect git index entry for '{}': {}",
+            rel_path,
+            if stderr.is_empty() {
+                "unknown git error".to_string()
+            } else {
+                stderr
+            }
+        );
+    }
+
+    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
 fn git_common_dir(root: &Path) -> Result<PathBuf> {

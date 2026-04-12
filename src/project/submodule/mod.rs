@@ -3,11 +3,12 @@ mod git;
 mod sync;
 
 use anyhow::{Context, Result};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
 use self::cleanup::{remove_repository, repository_names_to_remove};
-use self::git::ensure_git_repository_root;
+use self::git::{ensure_git_repository_root, managed_repository_names_from_gitmodules};
 use self::sync::{execute_network_syncs, prepare_repository_sync};
 use super::resolver::ManagedRepository;
 
@@ -31,8 +32,15 @@ pub fn remove_unused_repositories(
     current_repositories: &[String],
     desired_repositories: &[ManagedRepository],
 ) -> Result<()> {
+    let current_repositories = current_repositories
+        .iter()
+        .cloned()
+        .chain(managed_repository_names_from_gitmodules(root)?)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     let repositories_to_remove =
-        repository_names_to_remove(current_repositories, desired_repositories);
+        repository_names_to_remove(&current_repositories, desired_repositories);
     if repositories_to_remove.is_empty() {
         return Ok(());
     }
@@ -47,9 +55,9 @@ pub fn remove_unused_repositories(
 #[cfg(test)]
 mod tests {
     use super::cleanup::{remove_repository, repository_names_to_remove};
-    use super::git::{current_branch, submodule_git_dir};
+    use super::git::{current_branch, is_registered_submodule, submodule_git_dir};
     use super::sync::{NETWORK_SYNC_MAX_ATTEMPTS, run_network_sync_with_retry};
-    use super::sync_repositories;
+    use super::{remove_unused_repositories, sync_repositories};
     use crate::project::resolver::ManagedRepository;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -122,6 +130,14 @@ mod tests {
             .output()
             .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
             .unwrap()
+    }
+
+    fn gitmodules_contains_path(root: &Path, rel_path: &str) -> bool {
+        let gitmodules = root.join(".gitmodules");
+        gitmodules.exists()
+            && fs::read_to_string(gitmodules)
+                .map(|content| content.contains(rel_path))
+                .unwrap_or(false)
     }
 
     #[test]
@@ -203,6 +219,111 @@ mod tests {
             ],
         );
         assert!(root.join(rel_path).exists());
+
+        let _ = fs::remove_dir_all(origin);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remove_repository_cleans_gitmodules_entry_when_gitlink_is_already_gone() {
+        allow_file_protocol();
+
+        let origin = make_temp_dir("origin");
+        init_repo(&origin);
+        fs::write(origin.join("README.md"), "test").unwrap();
+        run_git(&origin, &["add", "README.md"]);
+        run_git(
+            &origin,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        );
+        run_git(&origin, &["branch", "-M", "main"]);
+
+        let root = make_temp_dir("root");
+        init_repo(&root);
+        fs::create_dir_all(root.join("Modules")).unwrap();
+
+        let origin_url = origin
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let rel_path = "Modules/TrajectoryControl";
+
+        run_git(
+            &root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-b",
+                "main",
+                &origin_url,
+                rel_path,
+            ],
+        );
+
+        let git_dir = submodule_git_dir(&root, rel_path).unwrap();
+        assert!(git_dir.exists());
+        assert!(is_registered_submodule(&root, rel_path).unwrap());
+
+        run_git(&root, &["update-index", "--force-remove", rel_path]);
+        fs::remove_dir_all(root.join(rel_path)).unwrap();
+
+        remove_repository(&root, "TrajectoryControl").unwrap();
+
+        assert!(!gitmodules_contains_path(&root, rel_path));
+        assert!(!is_registered_submodule(&root, rel_path).unwrap());
+        assert!(!git_dir.exists());
+
+        let _ = fs::remove_dir_all(origin);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remove_unused_repositories_uses_gitmodules_when_generated_state_is_stale() {
+        allow_file_protocol();
+
+        let origin = make_temp_dir("origin");
+        init_repo(&origin);
+        fs::write(origin.join("README.md"), "test").unwrap();
+        run_git(&origin, &["add", "README.md"]);
+        run_git(
+            &origin,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        );
+        run_git(&origin, &["branch", "-M", "main"]);
+
+        let root = make_temp_dir("root");
+        init_repo(&root);
+        fs::create_dir_all(root.join("Modules")).unwrap();
+
+        let origin_url = origin
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let rel_path = "Modules/TrajectoryControl";
+
+        run_git(
+            &root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-b",
+                "main",
+                &origin_url,
+                rel_path,
+            ],
+        );
+
+        remove_unused_repositories(&root, &[], &Vec::<ManagedRepository>::new()).unwrap();
+
+        assert!(!root.join(rel_path).exists());
+        assert!(!gitmodules_contains_path(&root, rel_path));
+        assert!(!is_registered_submodule(&root, rel_path).unwrap());
 
         let _ = fs::remove_dir_all(origin);
         let _ = fs::remove_dir_all(root);
