@@ -13,6 +13,7 @@
 - 从包索引解析包所属仓库与依赖关系
 - 将驱动仓库同步到 `Modules/` Git submodule
 - 生成 `cmake/wtr_modules.cmake` 供主工程引入
+- 支持全局配置多个索引镜像源与命名 org 镜像源
 - 交互式编辑项目直接依赖
 - 为驱动包生成或迁移 `cpkg.toml`
 - 为驱动包自动生成 `CMakeLists.txt`
@@ -150,7 +151,9 @@ cpkg add -I
 - `cpkg add` 会更新 `wtrproject.toml`
 - 如果有新增依赖，会同步 `Modules/` 下所需仓库
 - 会生成或更新 `cmake/wtr_modules.cmake`
-- `--submodule-protocol` 支持 `ssh` 和 `https`，默认是 `ssh`
+- `--submodule-protocol` 支持 `ssh` 和 `https`
+- 如果项目未显式设置 `[org].name`，则会优先使用全局 `config.toml` 中的 `default_org`
+- 如果不显式传入 `--submodule-protocol`，则优先使用项目 `[org]` 的 `protocol`，再回退到命名全局 org 源的 `default_protocol`，最后回退到内置默认 `ssh`
 
 ### 3. 从项目中移除直接依赖
 
@@ -211,11 +214,29 @@ url = "https://example.com/cpkg_index.json"
 cache_path = ".cpkg/cpkg_index.json"
 ```
 
+如果你希望项目只为当前仓库指定一个 org 源，也可以添加：
+
+```toml
+[org]
+name = "wtr-github"
+protocol = "https"
+```
+
+或者直接在项目内定义一套独立 org 前缀：
+
+```toml
+[org]
+ssh_base = "git@example.com:robot-packages"
+https_base = "https://example.com/robot-packages"
+protocol = "ssh"
+```
+
 包索引加载顺序为：
 
 1. `wtrproject.toml` 中的 `[index]` 配置
 2. 项目根目录的 `cpkg_index.json`
-3. 默认远程索引与本地缓存
+3. `~/.cpkg/config.toml` 中按顺序声明的全局 `[[index]]`
+4. 默认远程索引与本地缓存
 
 ## 集成到 CMake
 
@@ -310,10 +331,127 @@ cpkg init --help
 cpkg add --help
 cpkg remove --help
 cpkg sync --help
+cpkg config --help
+cpkg config init --help
+cpkg config index --help
+cpkg config org --help
 cpkg package --help
 cpkg package init --help
 cpkg package generate --help
 cpkg package create --help
+```
+
+## 全局镜像配置
+
+`cpkg` 支持用户级全局配置文件，默认位于 `~/.cpkg/config.toml`。
+
+- 如果这个文件**不存在**，`cpkg` 会继续使用**内部默认配置**
+- 如果你要修改全局配置，需要先显式创建文件：
+
+```bash
+cpkg config init
+```
+
+如需覆盖已有全局配置文件：
+
+```bash
+cpkg config init --force
+```
+
+`cpkg config init` 生成的默认模板会同时带上：
+
+- 一个默认的 `[[index]]`，指向内置 WTR 包索引
+- 一个默认的命名 `[[org]]`
+- `default_org` 指向这个默认 org
+
+可以先查看当前配置：
+
+```bash
+cpkg config show
+```
+
+### 全局索引源
+
+全局允许配置多个索引源，按顺序尝试使用；只有在项目没有显式 `[index]` 配置、项目根目录也没有 `cpkg_index.json` 时才会进入这条全局回退链。
+
+如果 `config.toml` 还没有创建，`cpkg config index list` 会显示当前使用的是内置默认索引；而任何 `add/set/remove/move` 写操作都会提示先运行 `cpkg config init`。
+
+也可以通过 `cpkg config index` 管理顺序：
+
+```bash
+cpkg config index list
+cpkg config index add --url https://mirror-a.example.com/cpkg_index.json
+cpkg config index add --url https://mirror-b.example.com/cpkg_index.json --position 1
+cpkg config index set 2 --path /tmp/cpkg_index.json
+cpkg config index move 2 1
+cpkg config index remove 1
+```
+
+其中位置参数都是 **1-based**，也就是第一个源的位置是 `1`。
+
+示例：
+
+```toml
+format_version = 1
+
+[[index]]
+url = "https://raw.githubusercontent.com/HITSZ-WTRobot-Packages/.github/main/cpkg_index.json"
+cache_path = "cpkg_index.json"
+
+[[index]]
+url = "https://mirror-a.example.com/cpkg_index.json"
+cache_path = "indexes/mirror-a.json"
+
+[[index]]
+url = "https://mirror-b.example.com/cpkg_index.json"
+cache_path = "indexes/mirror-b.json"
+```
+
+每个全局索引源都可以使用：
+
+- `path`：本地索引文件路径
+- `url`：远程索引地址
+- `cache_path`：远程索引缓存路径，仅在设置了 `url` 时有效
+
+### 全局 org 源
+
+全局允许配置多个命名 org 源。每个 org 源可以设置 SSH / HTTPS 两套仓库前缀，以及默认拉取协议；同时还可以用 `default_org` 指定**项目未显式选择时**默认使用哪个命名 org。
+
+示例：
+
+```toml
+format_version = 1
+
+default_org = "wtr-github"
+
+[[index]]
+url = "https://raw.githubusercontent.com/HITSZ-WTRobot-Packages/.github/main/cpkg_index.json"
+cache_path = "cpkg_index.json"
+
+[[org]]
+name = "wtr-github"
+ssh_base = "git@github.com:HITSZ-WTRobot-Packages"
+https_base = "https://github.com/HITSZ-WTRobot-Packages"
+default_protocol = "ssh"
+
+[[org]]
+name = "wtr-mirror"
+https_base = "https://gitee.com/example/wtr-packages"
+default_protocol = "https"
+```
+
+也可以通过命令更新指定名称的 org 源：
+
+```bash
+cpkg config org set wtr-github \
+  --ssh-base git@github.com:HITSZ-WTRobot-Packages \
+  --https-base https://github.com/HITSZ-WTRobot-Packages \
+  --default-protocol ssh
+
+cpkg config org set wtr-github --default-protocol https
+cpkg config org remove wtr-github
+cpkg config org default set wtr-github
+cpkg config org default clear
 ```
 
 ## 常见问题

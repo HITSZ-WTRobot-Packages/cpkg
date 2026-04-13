@@ -120,6 +120,19 @@ Prefer the existing resolution order implemented by the code:
 
 The current default remote index is the WTR package index on GitHub. Keep index-loading behavior configurable and avoid hard-coding new lookup paths in unrelated modules.
 
+### Mirror Source Configuration
+- Global mirror configuration should live under the user-level `cpkg` config and distinguish index sources from org sources.
+- Global index sources may contain multiple candidates and should be tried in order when project-level index overrides are absent.
+- Global index sources should also be manageable through `cpkg config index ...`, with order-aware add, set, remove, or move operations instead of requiring manual file edits.
+- Global org sources are named entries that can be updated through `cpkg config` without forcing users to hand-edit the whole config file.
+- The global config file may optionally choose one named global org source as the default when a project does not explicitly select an org source.
+- Org sources must support a default pull protocol (`ssh` or `https`) in addition to their remote base configuration.
+- If the global config file does not exist, runtime behavior should use built-in defaults without creating any file.
+- Commands that modify the global config must require the file to exist already and should instruct the user to run a dedicated create/init command first.
+- The dedicated global-config create/init command should write an explicit template that includes both the default org source and the default index source.
+- Project manifests may define at most one project-local index source and at most one project-local org source override.
+- Project-local org configuration may override the protocol used for that project without mutating global defaults.
+
 ## Development Workflow
 
 ### Build, Test, and Help Commands
