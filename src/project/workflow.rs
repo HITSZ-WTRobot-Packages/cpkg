@@ -2,7 +2,10 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
+use crate::config;
+
 use super::feedback::{write_add_interactive_summary, write_add_sync_deferred_notice};
+use super::source;
 use super::updates::{
     DependencyEditSummary, is_dependency_validation_error, merge_requested_packages,
     update_manifest_then,
@@ -24,7 +27,7 @@ pub struct SyncSummary {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SyncOptions {
-    pub submodule_protocol: SubmoduleProtocol,
+    pub submodule_protocol: Option<SubmoduleProtocol>,
     pub offline: bool,
 }
 
@@ -41,8 +44,8 @@ fn deferred_add_sync(error: &anyhow::Error) -> Option<DeferredAddSync> {
 
 fn sync_command_hint(options: SyncOptions) -> &'static str {
     match options.submodule_protocol {
-        SubmoduleProtocol::Ssh => "cpkg sync",
-        SubmoduleProtocol::Https => "cpkg sync --submodule-protocol https",
+        Some(SubmoduleProtocol::Https) => "cpkg sync --submodule-protocol https",
+        Some(SubmoduleProtocol::Ssh) | None => "cpkg sync",
     }
 }
 
@@ -71,10 +74,14 @@ fn resolve_project(
     index: &index::PackageIndex,
     options: SyncOptions,
 ) -> Result<ResolvedProject> {
+    let global_config = config::load_global_config()?;
+    let org_source = source::resolve_org_source(manifest, &global_config)?;
+    let protocol = source::effective_protocol(&org_source, options.submodule_protocol)?;
     resolver::resolve(
         index,
         &manifest.dependencies.packages,
-        options.submodule_protocol,
+        &org_source.repository_bases,
+        protocol,
     )
 }
 

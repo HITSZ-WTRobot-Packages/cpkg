@@ -101,7 +101,7 @@ pub(crate) fn write_add_interactive_summary(previous: &[String], next: &[String]
 mod tests {
     use super::{add_sync_deferred_notice_lines, init_guidance_lines};
     use crate::project::manifest::CURRENT_FORMAT_VERSION;
-    use crate::project::{DependencySection, IndexSection, ProjectSection, WtrProject};
+    use crate::project::{DependencySection, IndexSection, OrgSection, ProjectSection, WtrProject};
 
     #[test]
     fn init_guidance_mentions_add_before_sync_when_dependencies_are_empty() {
@@ -113,6 +113,7 @@ mod tests {
             },
             dependencies: DependencySection::default(),
             index: IndexSection::default(),
+            org: OrgSection::default(),
         });
 
         assert!(lines.iter().any(|line| line.contains("cpkg add <PACKAGE>")));
@@ -134,6 +135,7 @@ mod tests {
                 packages: vec!["MotorDrivers::DJI".to_string()],
             },
             index: IndexSection::default(),
+            org: OrgSection::default(),
         });
 
         assert!(!lines.iter().any(|line| line.contains("cpkg add <PACKAGE>")));

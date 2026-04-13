@@ -1,6 +1,13 @@
+pub mod config;
 pub mod package;
 pub mod project;
 
+pub use config::{
+    IndexSourceConfig, add_global_index_source, clear_global_default_org_source,
+    init_global_config, move_global_index_source, remove_global_index_source,
+    remove_global_org_source, set_global_default_org_source, set_global_index_source,
+    set_global_org_source, show_global_config, show_global_index_sources,
+};
 pub use package::{
     CMakeGenerator, Cpkg, DefaultFsScanner, Generator, Scanner, create as create_package,
     generate as generate_package, init as init_package,

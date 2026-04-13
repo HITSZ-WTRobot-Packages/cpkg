@@ -6,6 +6,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
+use super::resolver::SubmoduleProtocol;
+
 pub const CURRENT_FORMAT_VERSION: u32 = 1;
 pub const MANIFEST_FILENAME: &str = "wtrproject.toml";
 
@@ -19,6 +21,8 @@ pub struct WtrProject {
     pub dependencies: DependencySection,
     #[serde(default, skip_serializing_if = "IndexSection::is_empty")]
     pub index: IndexSection,
+    #[serde(default, skip_serializing_if = "OrgSection::is_empty")]
+    pub org: OrgSection,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -49,6 +53,28 @@ pub struct IndexSection {
 impl IndexSection {
     pub fn is_empty(&self) -> bool {
         self.path.is_none() && self.url.is_none() && self.cache_path.is_none()
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OrgSection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub https_base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<SubmoduleProtocol>,
+}
+
+impl OrgSection {
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none()
+            && self.ssh_base.is_none()
+            && self.https_base.is_none()
+            && self.protocol.is_none()
     }
 }
 
@@ -121,6 +147,30 @@ fn serialize_manifest(manifest: &WtrProject) -> String {
         }
         if let Some(cache_path) = &manifest.index.cache_path {
             write_key_value(&mut content, "cache_path", cache_path);
+        }
+    }
+
+    if !manifest.org.is_empty() {
+        content.push('\n');
+        content.push_str("[org]\n");
+        if let Some(name) = &manifest.org.name {
+            write_key_value(&mut content, "name", name);
+        }
+        if let Some(ssh_base) = &manifest.org.ssh_base {
+            write_key_value(&mut content, "ssh_base", ssh_base);
+        }
+        if let Some(https_base) = &manifest.org.https_base {
+            write_key_value(&mut content, "https_base", https_base);
+        }
+        if let Some(protocol) = manifest.org.protocol {
+            write_key_value(
+                &mut content,
+                "protocol",
+                match protocol {
+                    SubmoduleProtocol::Https => "https",
+                    SubmoduleProtocol::Ssh => "ssh",
+                },
+            );
         }
     }
 
@@ -246,6 +296,7 @@ pub(crate) fn prepare_init(root: &Path, options: &ProjectInitOptions) -> Result<
         },
         dependencies: DependencySection::default(),
         index: IndexSection::default(),
+        org: OrgSection::default(),
     })
 }
 
@@ -304,7 +355,10 @@ pub fn remove(root: &Path, packages: &[String]) -> Result<WtrProject> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProjectInitOptions, add, init, load, prepare_init, remove, serialize_manifest};
+    use super::{
+        OrgSection, ProjectInitOptions, add, init, load, prepare_init, remove, serialize_manifest,
+    };
+    use crate::project::SubmoduleProtocol;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -432,11 +486,35 @@ mod tests {
                 ],
             },
             index: super::IndexSection::default(),
+            org: OrgSection::default(),
         });
 
         assert!(content.contains("[dependencies]\npackages = [\n"));
         assert!(content.contains("    \"MotorDrivers::DJI\",\n"));
         assert!(content.contains("    \"bsp::CANDriver\",\n"));
         assert!(content.contains("]\n"));
+    }
+
+    #[test]
+    fn serialize_manifest_includes_org_section() {
+        let content = serialize_manifest(&super::WtrProject {
+            format_version: super::CURRENT_FORMAT_VERSION,
+            project: super::ProjectSection {
+                name: "robot".to_string(),
+                ioc_file: "robot.ioc".to_string(),
+            },
+            dependencies: super::DependencySection::default(),
+            index: super::IndexSection::default(),
+            org: OrgSection {
+                name: Some("mirror".to_string()),
+                ssh_base: None,
+                https_base: None,
+                protocol: Some(SubmoduleProtocol::Https),
+            },
+        });
+
+        assert!(content.contains("[org]"));
+        assert!(content.contains("name = \"mirror\""));
+        assert!(content.contains("protocol = \"https\""));
     }
 }

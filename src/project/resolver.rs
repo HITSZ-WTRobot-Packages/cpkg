@@ -1,17 +1,57 @@
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 use super::index::{IndexedPackage, PackageIndex};
 
 const BUILTIN_TARGETS: &[&str] = &["FreeRTOS", "stm32cubemx"];
-const HTTPS_REPO_BASE_URL: &str = "https://github.com/HITSZ-WTRobot-Packages";
-const SSH_REPO_BASE_URL: &str = "git@github.com:HITSZ-WTRobot-Packages";
+const DEFAULT_HTTPS_REPO_BASE_URL: &str = "https://github.com/HITSZ-WTRobot-Packages";
+const DEFAULT_SSH_REPO_BASE_URL: &str = "git@github.com:HITSZ-WTRobot-Packages";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SubmoduleProtocol {
     Https,
     #[default]
     Ssh,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryRemoteBases {
+    pub https_base: Option<String>,
+    pub ssh_base: Option<String>,
+}
+
+impl RepositoryRemoteBases {
+    pub fn wtr_default() -> Self {
+        Self {
+            https_base: Some(DEFAULT_HTTPS_REPO_BASE_URL.to_string()),
+            ssh_base: Some(DEFAULT_SSH_REPO_BASE_URL.to_string()),
+        }
+    }
+
+    pub fn ensure_protocol_supported(&self, protocol: SubmoduleProtocol) -> Result<()> {
+        match protocol {
+            SubmoduleProtocol::Https if self.https_base.is_none() => {
+                anyhow::bail!("selected org source does not define an `https_base`")
+            }
+            SubmoduleProtocol::Ssh if self.ssh_base.is_none() => {
+                anyhow::bail!("selected org source does not define an `ssh_base`")
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub fn repo_url(&self, repo: &str, protocol: SubmoduleProtocol) -> Result<String> {
+        self.ensure_protocol_supported(protocol)?;
+        let base = match protocol {
+            SubmoduleProtocol::Https => self.https_base.as_deref(),
+            SubmoduleProtocol::Ssh => self.ssh_base.as_deref(),
+        }
+        .expect("protocol support validated before use")
+        .trim_end_matches('/');
+        Ok(format!("{base}/{repo}.git"))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,13 +81,6 @@ pub struct ManagedRepository {
 enum VisitState {
     Visiting,
     Visited,
-}
-
-fn repo_url_with_protocol(repo: &str, protocol: SubmoduleProtocol) -> String {
-    match protocol {
-        SubmoduleProtocol::Https => format!("{HTTPS_REPO_BASE_URL}/{repo}.git"),
-        SubmoduleProtocol::Ssh => format!("{SSH_REPO_BASE_URL}/{repo}.git"),
-    }
 }
 
 fn is_builtin_target(package: &str) -> bool {
@@ -133,6 +166,7 @@ fn resolve_package(
 pub fn resolve(
     index: &PackageIndex,
     requested_packages: &[String],
+    repository_bases: &RepositoryRemoteBases,
     submodule_protocol: SubmoduleProtocol,
 ) -> Result<ResolvedProject> {
     let direct_targets = stable_unique(requested_packages);
@@ -155,12 +189,14 @@ pub fn resolve(
 
     let mut repositories = managed_packages
         .iter()
-        .map(|package| ManagedRepository {
-            name: package.repo.clone(),
-            url: repo_url_with_protocol(&package.repo, submodule_protocol),
-            rel_path: format!("Modules/{}", package.repo),
+        .map(|package| {
+            Ok(ManagedRepository {
+                name: package.repo.clone(),
+                url: repository_bases.repo_url(&package.repo, submodule_protocol)?,
+                rel_path: format!("Modules/{}", package.repo),
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     repositories.sort();
     repositories.dedup();
 
@@ -174,7 +210,7 @@ pub fn resolve(
 
 #[cfg(test)]
 mod tests {
-    use super::{SubmoduleProtocol, resolve};
+    use super::{RepositoryRemoteBases, SubmoduleProtocol, resolve};
     use crate::project::index::{IndexedPackage, PackageIndex};
 
     fn sample_index() -> PackageIndex {
@@ -217,6 +253,7 @@ mod tests {
         let resolved = resolve(
             &sample_index(),
             &["MotorDrivers::DJI".to_string()],
+            &RepositoryRemoteBases::wtr_default(),
             SubmoduleProtocol::Ssh,
         )
         .unwrap();
@@ -238,6 +275,7 @@ mod tests {
         let resolved = resolve(
             &sample_index(),
             &["MotorDrivers::DJI".to_string()],
+            &RepositoryRemoteBases::wtr_default(),
             SubmoduleProtocol::Https,
         )
         .unwrap();
@@ -272,7 +310,32 @@ mod tests {
             ],
         };
 
-        let error = resolve(&index, &["Cycle::A".to_string()], SubmoduleProtocol::Ssh).unwrap_err();
+        let error = resolve(
+            &index,
+            &["Cycle::A".to_string()],
+            &RepositoryRemoteBases::wtr_default(),
+            SubmoduleProtocol::Ssh,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("dependency cycle detected"));
+    }
+
+    #[test]
+    fn resolve_uses_custom_repository_bases() {
+        let resolved = resolve(
+            &sample_index(),
+            &["MotorDrivers::DJI".to_string()],
+            &RepositoryRemoteBases {
+                https_base: Some("https://example.com/mirror".to_string()),
+                ssh_base: Some("git@example.com:mirror".to_string()),
+            },
+            SubmoduleProtocol::Ssh,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolved.repositories[1].url,
+            "git@example.com:mirror/MotorDrivers.git"
+        );
     }
 }

@@ -3,10 +3,13 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::Path;
 
 use cpkg::{
-    ProjectInitOptions, SubmoduleProtocol, SyncOptions, add_packages_and_sync,
-    add_packages_interactive, create_package, generate_package, init_package, init_project,
-    init_project_interactive, project::write_init_integration_guidance, remove_packages,
-    sync_project,
+    IndexSourceConfig, ProjectInitOptions, SubmoduleProtocol, SyncOptions, add_global_index_source,
+    add_packages_and_sync, add_packages_interactive, clear_global_default_org_source,
+    create_package, generate_package, init_global_config, init_package, init_project,
+    init_project_interactive, move_global_index_source, project::write_init_integration_guidance,
+    remove_global_index_source, remove_global_org_source, remove_packages,
+    set_global_default_org_source, set_global_index_source, set_global_org_source,
+    show_global_config, show_global_index_sources, sync_project,
 };
 
 #[derive(Parser)]
@@ -28,6 +31,12 @@ cpkg add --offline MotorDrivers::DJI\n  \
 cpkg add -I --submodule-protocol https\n  \
 cpkg sync --submodule-protocol ssh\n  \
 cpkg sync --offline\n  \
+cpkg config init\n  \
+cpkg config show\n  \
+cpkg config index list\n  \
+cpkg config index add --url https://mirror.example.com/cpkg_index.json\n  \
+cpkg config org default set wtr-github\n  \
+cpkg config org set wtr-github --default-protocol https\n  \
 cpkg package init MotorDrivers::DJI --deps bsp::CANDriver"
 )]
 struct Cli {
@@ -45,6 +54,11 @@ enum Commands {
     Remove(RemoveArgs),
     /// Synchronize submodules and regenerate project integration files.
     Sync(SyncArgs),
+    /// Show or update global mirror configuration under `~/.cpkg/config.toml`.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
     /// Driver-package authoring commands for `cpkg.toml`.
     Package {
         #[command(subcommand)]
@@ -133,9 +147,9 @@ struct SyncArgs {
 #[derive(Args, Clone, Copy)]
 #[command(next_help_heading = "Sync Options")]
 struct SyncOptionArgs {
-    /// Protocol used when adding or updating Git submodule remotes.
-    #[arg(long, value_enum, default_value_t = SubmoduleProtocolArg::Ssh)]
-    submodule_protocol: SubmoduleProtocolArg,
+    /// Override the protocol used when adding or updating Git submodule remotes.
+    #[arg(long, value_enum)]
+    submodule_protocol: Option<SubmoduleProtocolArg>,
     /// Use the project-local or cached package index and skip Git fetch/pull operations.
     #[arg(long)]
     offline: bool,
@@ -161,10 +175,157 @@ impl From<SubmoduleProtocolArg> for SubmoduleProtocol {
 impl From<SyncOptionArgs> for SyncOptions {
     fn from(value: SyncOptionArgs) -> Self {
         SyncOptions {
-            submodule_protocol: value.submodule_protocol.into(),
+            submodule_protocol: value.submodule_protocol.map(Into::into),
             offline: value.offline,
         }
     }
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Create `~/.cpkg/config.toml` from the built-in template.
+    Init(ConfigInitArgs),
+    /// Print the current global config file path and contents.
+    Show,
+    /// Create, update, remove, or reorder global index sources.
+    Index {
+        #[command(subcommand)]
+        command: IndexConfigCommands,
+    },
+    /// Create, update, or remove named global org sources.
+    Org {
+        #[command(subcommand)]
+        command: OrgConfigCommands,
+    },
+}
+
+#[derive(Args)]
+struct ConfigInitArgs {
+    /// Overwrite an existing global config file.
+    #[arg(short, long)]
+    force: bool,
+}
+
+#[derive(Subcommand)]
+enum IndexConfigCommands {
+    /// List global index sources in the order they are tried.
+    List,
+    /// Add a new global index source.
+    Add(AddIndexSourceArgs),
+    /// Replace a global index source at a specific position.
+    Set(SetIndexSourceArgs),
+    /// Remove a global index source by its 1-based position.
+    Remove {
+        /// 1-based position of the index source to remove.
+        position: usize,
+    },
+    /// Move a global index source from one 1-based position to another.
+    Move {
+        /// Current 1-based position of the index source.
+        from: usize,
+        /// New 1-based position of the index source.
+        to: usize,
+    },
+}
+
+#[derive(Args, Clone)]
+struct IndexSourceArgs {
+    /// Local package index file path.
+    #[arg(long, conflicts_with = "url")]
+    path: Option<String>,
+    /// Remote package index URL.
+    #[arg(long, conflicts_with = "path")]
+    url: Option<String>,
+    /// Cache path used when `--url` is set.
+    #[arg(long, requires = "url")]
+    cache_path: Option<String>,
+}
+
+impl From<IndexSourceArgs> for IndexSourceConfig {
+    fn from(value: IndexSourceArgs) -> Self {
+        Self {
+            path: value.path,
+            url: value.url,
+            cache_path: value.cache_path,
+        }
+    }
+}
+
+#[derive(Args)]
+#[command(
+    about = "Add a new global index source",
+    after_help = "Examples:\n  \
+cpkg config index add --url https://mirror.example.com/cpkg_index.json\n  \
+cpkg config index add --path /tmp/cpkg_index.json --position 1"
+)]
+struct AddIndexSourceArgs {
+    #[command(flatten)]
+    source: IndexSourceArgs,
+    /// Insert position in the global fallback order; defaults to appending.
+    #[arg(long)]
+    position: Option<usize>,
+}
+
+#[derive(Args)]
+#[command(
+    about = "Replace a global index source at a specific position",
+    after_help = "Examples:\n  \
+cpkg config index set 1 --url https://mirror.example.com/cpkg_index.json --cache-path indexes/mirror.json\n  \
+cpkg config index set 2 --path /tmp/cpkg_index.json"
+)]
+struct SetIndexSourceArgs {
+    /// 1-based position of the index source to replace.
+    position: usize,
+    #[command(flatten)]
+    source: IndexSourceArgs,
+}
+
+#[derive(Subcommand)]
+enum OrgConfigCommands {
+    /// Create or update a named global org source.
+    Set(SetOrgSourceArgs),
+    /// Remove a named global org source.
+    Remove {
+        /// Name of the global org source to remove.
+        name: String,
+    },
+    /// Set or clear the named global org used by default.
+    Default {
+        #[command(subcommand)]
+        command: DefaultOrgConfigCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum DefaultOrgConfigCommands {
+    /// Use the named global org source by default.
+    Set {
+        /// Name of the global org source to use by default.
+        name: String,
+    },
+    /// Clear the explicit global default org source.
+    Clear,
+}
+
+#[derive(Args)]
+#[command(
+    about = "Create or update a named global org source",
+    after_help = "Examples:\n  \
+cpkg config org set wtr-github --ssh-base git@github.com:HITSZ-WTRobot-Packages --https-base https://github.com/HITSZ-WTRobot-Packages\n  \
+cpkg config org set wtr-github --default-protocol https"
+)]
+struct SetOrgSourceArgs {
+    /// Logical name of the org source.
+    name: String,
+    /// SSH repository base, such as `git@github.com:your-org`.
+    #[arg(long)]
+    ssh_base: Option<String>,
+    /// HTTPS repository base, such as `https://github.com/your-org`.
+    #[arg(long)]
+    https_base: Option<String>,
+    /// Default protocol to use when a project references this org source.
+    #[arg(long, value_enum)]
+    default_protocol: Option<SubmoduleProtocolArg>,
 }
 
 #[derive(Subcommand)]
@@ -222,6 +383,34 @@ pub fn run() -> Result<()> {
         Commands::Sync(args) => {
             sync_project(cwd, args.sync.into())?;
         }
+        Commands::Config { command } => match command {
+            ConfigCommands::Init(args) => init_global_config(args.force)?,
+            ConfigCommands::Show => show_global_config()?,
+            ConfigCommands::Index { command } => match command {
+                IndexConfigCommands::List => show_global_index_sources()?,
+                IndexConfigCommands::Add(args) => {
+                    add_global_index_source(args.source.into(), args.position)?
+                }
+                IndexConfigCommands::Set(args) => {
+                    set_global_index_source(args.position, args.source.into())?
+                }
+                IndexConfigCommands::Remove { position } => remove_global_index_source(position)?,
+                IndexConfigCommands::Move { from, to } => move_global_index_source(from, to)?,
+            },
+            ConfigCommands::Org { command } => match command {
+                OrgConfigCommands::Set(args) => set_global_org_source(
+                    &args.name,
+                    args.ssh_base,
+                    args.https_base,
+                    args.default_protocol.map(Into::into),
+                )?,
+                OrgConfigCommands::Remove { name } => remove_global_org_source(&name)?,
+                OrgConfigCommands::Default { command } => match command {
+                    DefaultOrgConfigCommands::Set { name } => set_global_default_org_source(&name)?,
+                    DefaultOrgConfigCommands::Clear => clear_global_default_org_source()?,
+                },
+            },
+        },
         Commands::Package { command } => match command {
             PackageCommands::Init {
                 pkgname,
@@ -238,7 +427,10 @@ pub fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Commands};
+    use super::{
+        Cli, Commands, ConfigCommands, DefaultOrgConfigCommands, IndexConfigCommands,
+        OrgConfigCommands,
+    };
     use clap::Parser;
 
     #[test]
@@ -248,6 +440,7 @@ mod tests {
         match cli.command {
             Commands::Add(args) => {
                 assert!(args.sync.offline);
+                assert!(args.sync.submodule_protocol.is_none());
                 assert_eq!(args.packages, vec!["MotorDrivers::DJI"]);
             }
             _ => panic!("expected add command"),
@@ -261,6 +454,142 @@ mod tests {
         match cli.command {
             Commands::Sync(args) => assert!(args.sync.offline),
             _ => panic!("expected sync command"),
+        }
+    }
+
+    #[test]
+    fn add_accepts_submodule_protocol_override() {
+        let cli = Cli::try_parse_from([
+            "cpkg",
+            "add",
+            "--submodule-protocol",
+            "https",
+            "MotorDrivers::DJI",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Add(args) => assert!(matches!(
+                args.sync.submodule_protocol,
+                Some(super::SubmoduleProtocolArg::Https)
+            )),
+            _ => panic!("expected add command"),
+        }
+    }
+
+    #[test]
+    fn config_org_set_accepts_named_source_updates() {
+        let cli = Cli::try_parse_from([
+            "cpkg",
+            "config",
+            "org",
+            "set",
+            "mirror",
+            "--default-protocol",
+            "https",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Config {
+                command:
+                    ConfigCommands::Org {
+                        command: OrgConfigCommands::Set(args),
+                    },
+            } => {
+                assert_eq!(args.name, "mirror");
+                assert!(matches!(
+                    args.default_protocol,
+                    Some(super::SubmoduleProtocolArg::Https)
+                ));
+            }
+            _ => panic!("expected config org set command"),
+        }
+    }
+
+    #[test]
+    fn config_init_accepts_force() {
+        let cli = Cli::try_parse_from(["cpkg", "config", "init", "--force"]).unwrap();
+
+        match cli.command {
+            Commands::Config {
+                command: ConfigCommands::Init(args),
+            } => assert!(args.force),
+            _ => panic!("expected config init command"),
+        }
+    }
+
+    #[test]
+    fn config_index_add_accepts_position_and_remote_source() {
+        let cli = Cli::try_parse_from([
+            "cpkg",
+            "config",
+            "index",
+            "add",
+            "--url",
+            "https://mirror.example.com/cpkg_index.json",
+            "--cache-path",
+            "indexes/mirror.json",
+            "--position",
+            "1",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Config {
+                command:
+                    ConfigCommands::Index {
+                        command: IndexConfigCommands::Add(args),
+                    },
+            } => {
+                assert_eq!(args.position, Some(1));
+                assert_eq!(
+                    args.source.url.as_deref(),
+                    Some("https://mirror.example.com/cpkg_index.json")
+                );
+                assert_eq!(
+                    args.source.cache_path.as_deref(),
+                    Some("indexes/mirror.json")
+                );
+            }
+            _ => panic!("expected config index add command"),
+        }
+    }
+
+    #[test]
+    fn config_index_move_accepts_positions() {
+        let cli = Cli::try_parse_from(["cpkg", "config", "index", "move", "3", "1"]).unwrap();
+
+        match cli.command {
+            Commands::Config {
+                command:
+                    ConfigCommands::Index {
+                        command: IndexConfigCommands::Move { from, to },
+                    },
+            } => {
+                assert_eq!(from, 3);
+                assert_eq!(to, 1);
+            }
+            _ => panic!("expected config index move command"),
+        }
+    }
+
+    #[test]
+    fn config_org_default_set_accepts_name() {
+        let cli =
+            Cli::try_parse_from(["cpkg", "config", "org", "default", "set", "mirror"]).unwrap();
+
+        match cli.command {
+            Commands::Config {
+                command:
+                    ConfigCommands::Org {
+                        command:
+                            OrgConfigCommands::Default {
+                                command: DefaultOrgConfigCommands::Set { name },
+                            },
+                    },
+            } => assert_eq!(name, "mirror"),
+            _ => panic!("expected config org default set command"),
         }
     }
 }
