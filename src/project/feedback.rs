@@ -45,6 +45,34 @@ pub fn write_init_integration_guidance(manifest: &WtrProject) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn add_sync_deferred_notice_lines(
+    repository_name: &str,
+    sync_command: &str,
+) -> Vec<String> {
+    vec![
+        format!(
+            "Updated `wtrproject.toml` only; `{}` and `Modules/` were left unchanged.",
+            integration::GENERATED_CMAKE_PATH
+        ),
+        format!(
+            "Applying this add requires fetching repository '{}'.",
+            repository_name
+        ),
+        format!("Run `{sync_command}` online to apply the change."),
+    ]
+}
+
+pub(crate) fn write_add_sync_deferred_notice(
+    repository_name: &str,
+    sync_command: &str,
+) -> Result<()> {
+    let term = Term::stderr();
+    for line in add_sync_deferred_notice_lines(repository_name, sync_command) {
+        term.write_line(&line)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn write_add_interactive_summary(previous: &[String], next: &[String]) -> Result<()> {
     let summary = dependency_edit_summary(previous, next);
     let term = Term::stderr();
@@ -71,7 +99,7 @@ pub(crate) fn write_add_interactive_summary(previous: &[String], next: &[String]
 
 #[cfg(test)]
 mod tests {
-    use super::init_guidance_lines;
+    use super::{add_sync_deferred_notice_lines, init_guidance_lines};
     use crate::project::manifest::CURRENT_FORMAT_VERSION;
     use crate::project::{DependencySection, IndexSection, ProjectSection, WtrProject};
 
@@ -110,5 +138,21 @@ mod tests {
 
         assert!(!lines.iter().any(|line| line.contains("cpkg add <PACKAGE>")));
         assert!(lines.iter().any(|line| line.contains("cpkg sync")));
+    }
+
+    #[test]
+    fn add_sync_deferred_notice_mentions_online_sync() {
+        let lines = add_sync_deferred_notice_lines(
+            "BasicComponents",
+            "cpkg sync --submodule-protocol https",
+        );
+
+        assert!(lines.iter().any(|line| line.contains("wtrproject.toml")));
+        assert!(lines.iter().any(|line| line.contains("BasicComponents")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("cpkg sync --submodule-protocol https"))
+        );
     }
 }

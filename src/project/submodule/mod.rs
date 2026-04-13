@@ -4,6 +4,8 @@ mod sync;
 
 use anyhow::{Context, Result};
 use std::collections::BTreeSet;
+use std::error::Error as StdError;
+use std::fmt;
 use std::fs;
 use std::path::Path;
 
@@ -14,6 +16,47 @@ use self::git::{
 };
 use self::sync::{execute_pending_syncs, prepare_repository_sync};
 use super::resolver::ManagedRepository;
+
+#[derive(Debug)]
+struct OnlineSyncRequired {
+    repository_name: String,
+}
+
+impl OnlineSyncRequired {
+    fn new(repository_name: impl Into<String>) -> Self {
+        Self {
+            repository_name: repository_name.into(),
+        }
+    }
+
+    fn repository_name(&self) -> &str {
+        &self.repository_name
+    }
+}
+
+impl fmt::Display for OnlineSyncRequired {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "repository '{}' is not present locally yet and requires an online `cpkg sync`",
+            self.repository_name
+        )
+    }
+}
+
+impl StdError for OnlineSyncRequired {}
+
+pub(crate) fn online_sync_required_error(repository_name: impl Into<String>) -> anyhow::Error {
+    OnlineSyncRequired::new(repository_name).into()
+}
+
+pub(crate) fn online_sync_required_repository(error: &anyhow::Error) -> Option<&str> {
+    error.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<OnlineSyncRequired>()
+            .map(OnlineSyncRequired::repository_name)
+    })
+}
 
 pub fn sync_repositories(root: &Path, repositories: &[ManagedRepository]) -> Result<()> {
     sync_repositories_with_options(root, repositories, false)
@@ -767,7 +810,7 @@ mod tests {
 
         let error = sync_repositories_with_options(&root, &[repository], true).unwrap_err();
         assert!(error.to_string().contains(
-            "cannot use `--offline` while repository 'TrajectoryControl' is not present locally yet"
+            "repository 'TrajectoryControl' is not present locally yet and requires an online `cpkg sync`"
         ));
 
         let _ = fs::remove_dir_all(origin);

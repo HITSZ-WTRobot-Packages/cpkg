@@ -9,6 +9,7 @@ use super::git::{
     is_registered_submodule, remove_stale_submodule_git_dir, run_git, run_git_concurrent,
     supports_offline_submodule_add,
 };
+use super::online_sync_required_error;
 use crate::project::network::{ConcurrentLogState, log_concurrent_event};
 use crate::project::resolver::ManagedRepository;
 
@@ -135,10 +136,7 @@ where
 
 fn add_submodule_without_fetch(root: &Path, repository: &ManagedRepository) -> Result<()> {
     if !supports_offline_submodule_add()? {
-        anyhow::bail!(
-            "git does not support adding submodules without fetching; cannot use `--offline` while repository '{}' is not present locally yet",
-            repository.name
-        );
+        return Err(online_sync_required_error(repository.name.clone()));
     }
 
     run_git(

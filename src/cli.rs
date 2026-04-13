@@ -85,7 +85,9 @@ cpkg add MotorDrivers::DJI\n  \
 cpkg add MotorDrivers::DJI bsp::CANDriver --submodule-protocol ssh\n  \
 cpkg add --offline MotorDrivers::DJI\n  \
 cpkg add -I --submodule-protocol https\n  \
-cpkg add -I MotorDrivers::DJI"
+cpkg add -I MotorDrivers::DJI\n\n\
+If `cpkg add --offline` records a dependency that cannot be applied without fetching a new \
+repository, it still updates `wtrproject.toml`; run `cpkg sync` online later to apply it."
 )]
 struct AddArgs {
     /// Edit direct dependencies in an interactive tree picker.

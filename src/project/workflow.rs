@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
-use super::feedback::write_add_interactive_summary;
+use super::feedback::{write_add_interactive_summary, write_add_sync_deferred_notice};
 use super::updates::{
     DependencyEditSummary, is_dependency_validation_error, merge_requested_packages,
     update_manifest_then,
@@ -26,6 +26,44 @@ pub struct SyncSummary {
 pub struct SyncOptions {
     pub submodule_protocol: SubmoduleProtocol,
     pub offline: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeferredAddSync {
+    repository_name: String,
+}
+
+fn deferred_add_sync(error: &anyhow::Error) -> Option<DeferredAddSync> {
+    submodule::online_sync_required_repository(error).map(|repository_name| DeferredAddSync {
+        repository_name: repository_name.to_string(),
+    })
+}
+
+fn sync_command_hint(options: SyncOptions) -> &'static str {
+    match options.submodule_protocol {
+        SubmoduleProtocol::Ssh => "cpkg sync",
+        SubmoduleProtocol::Https => "cpkg sync --submodule-protocol https",
+    }
+}
+
+fn finalize_add_result(
+    root: &Path,
+    result: Result<WtrProject>,
+) -> Result<(WtrProject, Option<DeferredAddSync>)> {
+    match result {
+        Ok(manifest) => Ok((manifest, None)),
+        Err(error) => match deferred_add_sync(&error) {
+            Some(deferred_sync) => Ok((load(root)?, Some(deferred_sync))),
+            None => Err(error),
+        },
+    }
+}
+
+fn write_deferred_add_sync_notice(
+    deferred_sync: &DeferredAddSync,
+    options: SyncOptions,
+) -> Result<()> {
+    write_add_sync_deferred_notice(&deferred_sync.repository_name, sync_command_hint(options))
 }
 
 fn resolve_project(
@@ -120,35 +158,42 @@ fn refresh_project_links(
     Ok(path)
 }
 
-fn add_then_sync(root: &Path, packages: &[String], options: SyncOptions) -> Result<WtrProject> {
+fn add_then_sync(
+    root: &Path,
+    packages: &[String],
+    options: SyncOptions,
+) -> Result<(WtrProject, Option<DeferredAddSync>)> {
     if packages.is_empty() {
-        return load(root);
+        return Ok((load(root)?, None));
     }
 
-    update_manifest_then(
+    finalize_add_result(
         root,
-        |manifest| {
-            manifest
-                .dependencies
-                .packages
-                .extend(packages.iter().cloned());
-        },
-        |manifest| {
-            let index = load_index_for_sync(root, manifest, options)?;
-            let resolved = resolve_project(manifest, &index, options)?;
-            finish_sync(root, manifest, &resolved, options).map(|_| ())
-        },
-        is_dependency_validation_error,
+        update_manifest_then(
+            root,
+            |manifest| {
+                manifest
+                    .dependencies
+                    .packages
+                    .extend(packages.iter().cloned());
+            },
+            |manifest| {
+                let index = load_index_for_sync(root, manifest, options)?;
+                let resolved = resolve_project(manifest, &index, options)?;
+                finish_sync(root, manifest, &resolved, options).map(|_| ())
+            },
+            is_dependency_validation_error,
+        ),
     )
 }
 
-pub(crate) fn apply_interactive_selection(
+fn apply_interactive_selection(
     root: &Path,
     manifest: &WtrProject,
     selected_packages: &[String],
     index: &index::PackageIndex,
     options: SyncOptions,
-) -> Result<(WtrProject, DependencyEditSummary)> {
+) -> Result<(WtrProject, DependencyEditSummary, Option<DeferredAddSync>)> {
     let summary =
         super::updates::dependency_edit_summary(&manifest.dependencies.packages, selected_packages);
     let mut updated_manifest = manifest.clone();
@@ -156,13 +201,14 @@ pub(crate) fn apply_interactive_selection(
     let resolved = resolved_project_from_index(&updated_manifest, index, options)?;
     save(root, &updated_manifest)?;
 
-    if summary.added.is_empty() {
-        refresh_project_links(root, &updated_manifest, options)?;
+    let apply_result = if summary.added.is_empty() {
+        refresh_project_links(root, &updated_manifest, options).and_then(|_| load(root))
     } else {
-        finish_sync(root, &updated_manifest, &resolved, options)?;
-    }
+        finish_sync(root, &updated_manifest, &resolved, options).and_then(|_| load(root))
+    };
+    let (updated_manifest, deferred_sync) = finalize_add_result(root, apply_result)?;
 
-    Ok((load(root)?, summary))
+    Ok((updated_manifest, summary, deferred_sync))
 }
 
 pub fn sync(root: &Path, options: SyncOptions) -> Result<SyncSummary> {
@@ -175,7 +221,11 @@ pub fn sync(root: &Path, options: SyncOptions) -> Result<SyncSummary> {
 }
 
 pub fn add_and_sync(root: &Path, packages: &[String], options: SyncOptions) -> Result<WtrProject> {
-    add_then_sync(root, packages, options)
+    let (manifest, deferred_sync) = add_then_sync(root, packages, options)?;
+    if let Some(deferred_sync) = deferred_sync {
+        write_deferred_add_sync_notice(&deferred_sync, options)?;
+    }
+    Ok(manifest)
 }
 
 pub fn remove(root: &Path, packages: &[String]) -> Result<WtrProject> {
@@ -242,16 +292,22 @@ pub fn add_interactive(
         Some(packages) => packages,
         None => return Ok(manifest),
     };
-    let (updated_manifest, _) =
+    let (updated_manifest, _, deferred_sync) =
         apply_interactive_selection(root, &manifest, &interactive_packages, &index, options)?;
     write_add_interactive_summary(&previous_packages, &interactive_packages)?;
+    if let Some(deferred_sync) = deferred_sync {
+        write_deferred_add_sync_notice(&deferred_sync, options)?;
+    }
     Ok(updated_manifest)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{SyncOptions, apply_interactive_selection, refresh_project_links, remove};
-    use crate::project::{ProjectInitOptions, index::PackageIndex, init, load, save};
+    use super::{
+        SyncOptions, add_then_sync, apply_interactive_selection, finalize_add_result,
+        refresh_project_links, remove,
+    };
+    use crate::project::{ProjectInitOptions, index::PackageIndex, init, load, save, submodule};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -416,7 +472,7 @@ mod tests {
         save(&dir, &manifest).unwrap();
         refresh_project_links(&dir, &manifest, SyncOptions::default()).unwrap();
 
-        let (updated_manifest, summary) = apply_interactive_selection(
+        let (updated_manifest, summary, deferred_sync) = apply_interactive_selection(
             &dir,
             &manifest,
             &["bsp::CANDriver".to_string()],
@@ -426,6 +482,7 @@ mod tests {
         .unwrap();
 
         assert!(summary.added.is_empty());
+        assert!(deferred_sync.is_none());
         assert_eq!(summary.removed, vec!["MotorDrivers::DJI"]);
         assert_eq!(
             updated_manifest.dependencies.packages,
@@ -500,6 +557,66 @@ mod tests {
         assert!(!integration.contains("Modules/SharedRepo/feature_b"));
         assert!(integration.contains("\"${CMAKE_CURRENT_LIST_DIR}/../${_wtr_package_dir}\""));
         assert!(!integration.contains("\"${CMAKE_CURRENT_LIST_DIR}/../Modules/${_wtr_repo}\""));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn finalize_add_result_keeps_manifest_when_online_sync_is_required() {
+        let dir = make_temp_dir("deferred-add-result");
+        fs::write(dir.join("robot.ioc"), "").unwrap();
+
+        init(
+            &dir,
+            ProjectInitOptions {
+                force: false,
+                name: Some("robot".to_string()),
+                ioc: None,
+            },
+        )
+        .unwrap();
+
+        let mut manifest = load(&dir).unwrap();
+        manifest.dependencies.packages = vec!["utils::Logger".to_string()];
+        save(&dir, &manifest).unwrap();
+
+        let (updated_manifest, deferred_sync) = finalize_add_result(
+            &dir,
+            Err(submodule::online_sync_required_error("BasicComponents")),
+        )
+        .unwrap();
+
+        assert_eq!(
+            updated_manifest.dependencies.packages,
+            vec!["utils::Logger"]
+        );
+        assert_eq!(
+            deferred_sync.unwrap().repository_name,
+            "BasicComponents".to_string()
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn add_then_sync_returns_manifest_when_no_packages_are_given() {
+        let dir = make_temp_dir("add-no-packages");
+        fs::write(dir.join("robot.ioc"), "").unwrap();
+
+        init(
+            &dir,
+            ProjectInitOptions {
+                force: false,
+                name: Some("robot".to_string()),
+                ioc: None,
+            },
+        )
+        .unwrap();
+
+        let (manifest, deferred_sync) = add_then_sync(&dir, &[], SyncOptions::default()).unwrap();
+
+        assert!(manifest.dependencies.packages.is_empty());
+        assert!(deferred_sync.is_none());
 
         let _ = fs::remove_dir_all(dir);
     }
