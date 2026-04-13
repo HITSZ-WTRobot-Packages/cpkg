@@ -6,11 +6,11 @@ use tracing::info;
 
 use super::git::{
     align_main_to_origin, ensure_main_checked_out, is_initialized_submodule,
-    is_registered_submodule, remove_stale_submodule_git_dir, run_git, run_git_concurrent,
+    is_registered_submodule, remove_stale_submodule_git_dir, run_git, run_git_network,
     supports_offline_submodule_add,
 };
 use super::online_sync_required_error;
-use crate::project::network::{ConcurrentLogState, log_concurrent_event};
+use crate::project::network::NetworkBatchLogger;
 use crate::project::resolver::ManagedRepository;
 
 pub(super) const NETWORK_SYNC_MAX_ATTEMPTS: usize = 2;
@@ -21,6 +21,7 @@ pub(super) enum PendingSubmoduleSync {
     Initialize {
         root: PathBuf,
         repository: ManagedRepository,
+        logger: NetworkBatchLogger,
     },
     InitializeOffline {
         root: PathBuf,
@@ -29,6 +30,7 @@ pub(super) enum PendingSubmoduleSync {
     Pull {
         path: PathBuf,
         repository_name: String,
+        logger: NetworkBatchLogger,
     },
 }
 
@@ -45,18 +47,28 @@ impl PendingSubmoduleSync {
 
     fn execute(self) -> Result<()> {
         match self {
-            Self::Initialize { root, repository } => {
+            Self::Initialize {
+                root,
+                repository,
+                logger,
+            } => {
                 let rel_path = repository.rel_path.as_str();
                 let abs_path = root.join(rel_path);
-                run_network_sync_with_retry(&repository.name, "initializing submodule", || {
-                    run_git_concurrent(
-                        &root,
-                        &["submodule", "update", "--init", "--remote", "--", rel_path],
-                        &format!("initializing submodule {}", repository.name),
-                        &repository.name,
-                    )
-                    .map(|_| ())
-                })?;
+                run_network_sync_with_retry(
+                    &repository.name,
+                    "initializing submodule",
+                    &logger,
+                    || {
+                        run_git_network(
+                            &root,
+                            &["submodule", "update", "--init", "--remote", "--", rel_path],
+                            &format!("initializing submodule {}", repository.name),
+                            &repository.name,
+                            &logger,
+                        )
+                        .map(|_| ())
+                    },
+                )?;
                 align_main_to_origin(&abs_path, &repository.name)?;
                 info!("synchronized submodule {}", repository.name);
                 Ok(())
@@ -79,7 +91,6 @@ impl PendingSubmoduleSync {
                         "initializing submodule {} from local cache",
                         repository.name
                     ),
-                    false,
                 )?;
                 align_main_to_origin(&abs_path, &repository.name)?;
                 info!("initialized submodule {} from local cache", repository.name);
@@ -88,16 +99,23 @@ impl PendingSubmoduleSync {
             Self::Pull {
                 path,
                 repository_name,
+                logger,
             } => {
-                run_network_sync_with_retry(&repository_name, "pulling latest main", || {
-                    run_git_concurrent(
-                        &path,
-                        &["pull", "--ff-only", "origin", "main"],
-                        &format!("pulling latest main for {repository_name}"),
-                        &repository_name,
-                    )
-                    .map(|_| ())
-                })?;
+                run_network_sync_with_retry(
+                    &repository_name,
+                    "pulling latest main",
+                    &logger,
+                    || {
+                        run_git_network(
+                            &path,
+                            &["pull", "--ff-only", "origin", "main"],
+                            &format!("pulling latest main for {repository_name}"),
+                            &repository_name,
+                            &logger,
+                        )
+                        .map(|_| ())
+                    },
+                )?;
                 info!("synchronized submodule {}", repository_name);
                 Ok(())
             }
@@ -108,6 +126,7 @@ impl PendingSubmoduleSync {
 pub(super) fn run_network_sync_with_retry<Action>(
     repository_name: &str,
     operation: &str,
+    logger: &NetworkBatchLogger,
     mut action: Action,
 ) -> Result<()>
 where
@@ -118,9 +137,8 @@ where
             Ok(()) => return Ok(()),
             Err(error) if attempt < NETWORK_SYNC_MAX_ATTEMPTS => {
                 let summary = error.to_string();
-                let _ = log_concurrent_event(
+                let _ = logger.log_retry(
                     repository_name,
-                    ConcurrentLogState::Retrying,
                     &format!(
                         "{operation} failed on attempt {attempt}/{NETWORK_SYNC_MAX_ATTEMPTS}: {summary}; retrying"
                     ),
@@ -151,7 +169,6 @@ fn add_submodule_without_fetch(root: &Path, repository: &ManagedRepository) -> R
             repository.rel_path.as_str(),
         ],
         &format!("adding submodule {} without fetching", repository.name),
-        false,
     )?;
     info!(
         "registered submodule {} without fetching repository data",
@@ -164,6 +181,7 @@ pub(super) fn prepare_repository_sync(
     root: &Path,
     repository: &ManagedRepository,
     offline: bool,
+    logger: &NetworkBatchLogger,
 ) -> Result<Option<PendingSubmoduleSync>> {
     let rel_path = repository.rel_path.as_str();
     let abs_path = root.join(rel_path);
@@ -181,11 +199,12 @@ pub(super) fn prepare_repository_sync(
         if offline {
             add_submodule_without_fetch(root, repository)?;
         } else {
-            run_git(
+            run_git_network(
                 root,
                 &["submodule", "add", "-b", "main", &repository.url, rel_path],
                 &format!("adding submodule {}", repository.name),
-                true,
+                &repository.name,
+                logger,
             )?;
             info!("synchronized submodule {}", repository.name);
         }
@@ -196,7 +215,6 @@ pub(super) fn prepare_repository_sync(
         root,
         &["submodule", "set-url", "--", rel_path, &repository.url],
         &format!("setting remote URL for {}", repository.name),
-        false,
     )?;
 
     run_git(
@@ -210,7 +228,6 @@ pub(super) fn prepare_repository_sync(
             rel_path,
         ],
         &format!("tracking main for {}", repository.name),
-        false,
     )?;
 
     if !is_initialized_submodule(&abs_path) {
@@ -223,6 +240,7 @@ pub(super) fn prepare_repository_sync(
             PendingSubmoduleSync::Initialize {
                 root: root.to_path_buf(),
                 repository: repository.clone(),
+                logger: logger.clone(),
             }
         }));
     }
@@ -236,6 +254,7 @@ pub(super) fn prepare_repository_sync(
     Ok(Some(PendingSubmoduleSync::Pull {
         path: abs_path,
         repository_name: repository.name.clone(),
+        logger: logger.clone(),
     }))
 }
 

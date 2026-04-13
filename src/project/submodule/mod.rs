@@ -16,6 +16,7 @@ use self::git::{
 };
 use self::sync::{execute_pending_syncs, prepare_repository_sync};
 use super::resolver::ManagedRepository;
+use crate::project::network::NetworkBatchLogger;
 
 #[derive(Debug)]
 struct OnlineSyncRequired {
@@ -67,19 +68,33 @@ pub fn sync_repositories_with_options(
     repositories: &[ManagedRepository],
     offline: bool,
 ) -> Result<()> {
+    let network_logger = NetworkBatchLogger::new();
     ensure_git_repository_root(root)?;
     fs::create_dir_all(root.join("Modules")).context("failed to create Modules directory")?;
-    repair_gitmodules_if_needed(root, repositories)?;
+    let result = (|| -> Result<()> {
+        repair_gitmodules_if_needed(root, repositories)?;
 
-    let mut pending_syncs = Vec::new();
-    for repository in repositories {
-        if let Some(sync) = prepare_repository_sync(root, repository, offline)? {
-            pending_syncs.push(sync);
+        let mut pending_syncs = Vec::new();
+        for repository in repositories {
+            if let Some(sync) = prepare_repository_sync(root, repository, offline, &network_logger)?
+            {
+                pending_syncs.push(sync);
+            }
+        }
+        execute_pending_syncs(pending_syncs)?;
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            network_logger.finish_success()?;
+            Ok(())
+        }
+        Err(error) => {
+            network_logger.finish_failure();
+            Err(error)
         }
     }
-    execute_pending_syncs(pending_syncs)?;
-
-    Ok(())
 }
 
 pub fn remove_unused_repositories(
@@ -117,6 +132,7 @@ mod tests {
     };
     use super::sync::{NETWORK_SYNC_MAX_ATTEMPTS, run_network_sync_with_retry};
     use super::{remove_unused_repositories, sync_repositories, sync_repositories_with_options};
+    use crate::project::network::NetworkBatchLogger;
     use crate::project::resolver::ManagedRepository;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -899,18 +915,98 @@ mod tests {
     }
 
     #[test]
+    fn sync_repositories_handles_mixed_added_and_updated_submodules() {
+        allow_file_protocol();
+
+        let origin_a = make_temp_dir("origin-a");
+        let origin_b = make_temp_dir("origin-b");
+        init_repo(&origin_a);
+        init_repo(&origin_b);
+        commit_file(&origin_a, "README.md", "a1\n", "init");
+        commit_file(&origin_b, "README.md", "b1\n", "init");
+        run_git(&origin_a, &["branch", "-M", "main"]);
+        run_git(&origin_b, &["branch", "-M", "main"]);
+
+        let root = make_temp_dir("root");
+        init_repo(&root);
+        fs::create_dir_all(root.join("Modules")).unwrap();
+
+        let repository_a = ManagedRepository {
+            name: "TrajectoryControl".to_string(),
+            url: origin_a
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            rel_path: "Modules/TrajectoryControl".to_string(),
+        };
+        let repository_b = ManagedRepository {
+            name: "BasicComponents".to_string(),
+            url: origin_b
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            rel_path: "Modules/BasicComponents".to_string(),
+        };
+
+        run_git(
+            &root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-b",
+                "main",
+                &repository_a.url,
+                &repository_a.rel_path,
+            ],
+        );
+
+        let latest_a = commit_file(&origin_a, "README.md", "a2\n", "update");
+        let latest_b = commit_file(&origin_b, "README.md", "b2\n", "update");
+
+        sync_repositories(&root, &[repository_a.clone(), repository_b.clone()]).unwrap();
+
+        assert_eq!(
+            current_branch(&root.join(&repository_a.rel_path))
+                .unwrap()
+                .as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            current_branch(&root.join(&repository_b.rel_path))
+                .unwrap()
+                .as_deref(),
+            Some("main")
+        );
+        assert_eq!(head_commit(&root.join(&repository_a.rel_path)), latest_a);
+        assert_eq!(head_commit(&root.join(&repository_b.rel_path)), latest_b);
+
+        let _ = fs::remove_dir_all(origin_a);
+        let _ = fs::remove_dir_all(origin_b);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn run_network_sync_with_retry_retries_once_before_success() {
         let mut attempts = 0;
+        let logger = NetworkBatchLogger::new();
 
-        let result =
-            run_network_sync_with_retry("TrajectoryControl", "pulling latest main", || {
+        let result = run_network_sync_with_retry(
+            "TrajectoryControl",
+            "pulling latest main",
+            &logger,
+            || {
                 attempts += 1;
                 if attempts < NETWORK_SYNC_MAX_ATTEMPTS {
                     anyhow::bail!("temporary network error")
                 } else {
                     Ok(())
                 }
-            });
+            },
+        );
 
         assert!(result.is_ok());
         assert_eq!(attempts, NETWORK_SYNC_MAX_ATTEMPTS);
@@ -919,11 +1015,17 @@ mod tests {
     #[test]
     fn run_network_sync_with_retry_returns_last_error_after_exhausting_attempts() {
         let mut attempts = 0;
+        let logger = NetworkBatchLogger::new();
 
-        let error = run_network_sync_with_retry("TrajectoryControl", "pulling latest main", || {
-            attempts += 1;
-            anyhow::bail!("permanent network error")
-        })
+        let error = run_network_sync_with_retry(
+            "TrajectoryControl",
+            "pulling latest main",
+            &logger,
+            || {
+                attempts += 1;
+                anyhow::bail!("permanent network error")
+            },
+        )
         .unwrap_err();
 
         assert_eq!(attempts, NETWORK_SYNC_MAX_ATTEMPTS);

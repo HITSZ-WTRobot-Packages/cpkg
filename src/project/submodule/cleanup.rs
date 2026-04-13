@@ -38,13 +38,11 @@ pub(super) fn remove_repository(root: &Path, repository_name: &str) -> Result<()
             root,
             &["submodule", "deinit", "-f", "--", &rel_path],
             &format!("deinitializing submodule {repository_name}"),
-            false,
         )?;
         run_git(
             root,
             &["update-index", "--force-remove", "--", &rel_path],
             &format!("removing git index entry for submodule {repository_name}"),
-            false,
         )?;
 
         let abs_path = root.join(&rel_path);

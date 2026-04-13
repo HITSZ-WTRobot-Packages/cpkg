@@ -5,53 +5,42 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::info;
 
-use crate::project::network::{run_logged_command, run_logged_command_concurrent};
+use crate::project::network::{NetworkBatchLogger, run_logged_command_in_batch};
 use crate::project::resolver::ManagedRepository;
 
-pub(super) fn run_git(
-    root: &Path,
-    args: &[&str],
-    description: &str,
-    show_logs: bool,
-) -> Result<String> {
+pub(super) fn run_git(root: &Path, args: &[&str], description: &str) -> Result<String> {
     let mut command = Command::new("git");
     command.arg("-C").arg(root).args(args);
+    let output = command
+        .output()
+        .with_context(|| format!("failed to run git for {}", description))?;
 
-    if show_logs {
-        let output = run_logged_command(&mut command, description)
-            .with_context(|| format!("failed to run git for {description}"))?;
-        Ok(output.stdout.trim().to_string())
-    } else {
-        let output = command
-            .output()
-            .with_context(|| format!("failed to run git for {}", description))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            anyhow::bail!(
-                "git failed while {}: {}",
-                description,
-                if stderr.is_empty() {
-                    "unknown git error".to_string()
-                } else {
-                    stderr
-                }
-            );
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!(
+            "git failed while {}: {}",
+            description,
+            if stderr.is_empty() {
+                "unknown git error".to_string()
+            } else {
+                stderr
+            }
+        );
     }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-pub(super) fn run_git_concurrent(
+pub(super) fn run_git_network(
     root: &Path,
     args: &[&str],
     description: &str,
-    prefix: &str,
+    label: &str,
+    logger: &NetworkBatchLogger,
 ) -> Result<String> {
     let mut command = Command::new("git");
     command.arg("-C").arg(root).args(args);
-    let output = run_logged_command_concurrent(&mut command, description, prefix)
+    let output = run_logged_command_in_batch(&mut command, description, label, logger)
         .with_context(|| format!("failed to run git for {description}"))?;
     Ok(output.stdout.trim().to_string())
 }
@@ -81,7 +70,6 @@ pub(super) fn ensure_git_repository_root(root: &Path) -> Result<()> {
         root,
         &["rev-parse", "--show-toplevel"],
         "checking repository root",
-        false,
     )?;
     let canonical_root = fs::canonicalize(root).context("failed to resolve current directory")?;
     let canonical_toplevel =
@@ -166,14 +154,12 @@ pub(super) fn ensure_main_checked_out(path: &Path, repository_name: &str) -> Res
             path,
             &["checkout", "main"],
             &format!("checking out main for {repository_name}"),
-            false,
         )?;
     } else {
         run_git(
             path,
             &["checkout", "-b", "main", "--track", "origin/main"],
             &format!("creating main for {repository_name}"),
-            false,
         )?;
     }
 
@@ -185,19 +171,16 @@ pub(super) fn align_main_to_origin(path: &Path, repository_name: &str) -> Result
         path,
         &["branch", "-f", "main", "origin/main"],
         &format!("aligning main to origin/main for {repository_name}"),
-        false,
     )?;
     run_git(
         path,
         &["checkout", "main"],
         &format!("checking out main for {repository_name}"),
-        false,
     )?;
     run_git(
         path,
         &["branch", "--set-upstream-to", "origin/main", "main"],
         &format!("tracking origin/main for {repository_name}"),
-        false,
     )?;
     Ok(())
 }
@@ -318,7 +301,6 @@ fn write_gitmodules_entry(root: &Path, repository: &ManagedRepository) -> Result
             &repository.rel_path,
         ],
         &format!("restoring .gitmodules path for {}", repository.name),
-        false,
     )?;
     run_git(
         root,
@@ -330,7 +312,6 @@ fn write_gitmodules_entry(root: &Path, repository: &ManagedRepository) -> Result
             &repository.url,
         ],
         &format!("restoring .gitmodules url for {}", repository.name),
-        false,
     )?;
     run_git(
         root,
@@ -342,7 +323,6 @@ fn write_gitmodules_entry(root: &Path, repository: &ManagedRepository) -> Result
             "main",
         ],
         &format!("restoring .gitmodules branch for {}", repository.name),
-        false,
     )?;
 
     Ok(())
@@ -439,7 +419,6 @@ pub(super) fn remove_submodule_registration(root: &Path, rel_path: &str) -> Resu
             &section,
         ],
         &format!("removing .gitmodules entry for {rel_path}"),
-        false,
     )?;
 
     Ok(true)
@@ -474,7 +453,6 @@ fn git_common_dir(root: &Path) -> Result<PathBuf> {
         root,
         &["rev-parse", "--git-common-dir"],
         "resolving git dir",
-        false,
     )?;
     let git_dir = PathBuf::from(git_dir);
 

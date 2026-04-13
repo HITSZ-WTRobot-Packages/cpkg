@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::{info, warn};
 
-use super::network::run_logged_command;
+use super::network::{NetworkBatchLogger, run_logged_command_in_batch};
 use super::{IndexSection, WtrProject};
 
 pub const DEFAULT_INDEX_URL: &str =
@@ -132,11 +132,16 @@ pub fn load_from_path(path: &Path) -> Result<PackageIndex> {
     Ok(index)
 }
 
-fn run_curl_download(url: &str, target: &Path) -> Result<()> {
+fn run_curl_download(url: &str, target: &Path, logger: &NetworkBatchLogger) -> Result<()> {
     let mut command = Command::new("curl");
     command.arg("-fsSL").arg("-o").arg(target).arg(url);
-    run_logged_command(&mut command, "Downloading package index with curl")
-        .context("failed to execute curl for package index download")?;
+    run_logged_command_in_batch(
+        &mut command,
+        "Downloading package index with curl",
+        "index",
+        logger,
+    )
+    .context("failed to execute curl for package index download")?;
     Ok(())
 }
 
@@ -146,7 +151,12 @@ fn power_shell_literal(value: &str) -> String {
 }
 
 #[cfg(windows)]
-fn run_powershell_download(program: &str, url: &str, target: &Path) -> Result<()> {
+fn run_powershell_download(
+    program: &str,
+    url: &str,
+    target: &Path,
+    logger: &NetworkBatchLogger,
+) -> Result<()> {
     let url = power_shell_literal(url);
     let target = power_shell_literal(&target.to_string_lossy());
     let command = format!("Invoke-WebRequest -Uri '{url}' -OutFile '{target}'");
@@ -159,15 +169,18 @@ fn run_powershell_download(program: &str, url: &str, target: &Path) -> Result<()
         "-Command",
         &command,
     ]);
-    run_logged_command(
+    run_logged_command_in_batch(
         &mut process,
         &format!("Downloading package index with {program}"),
+        "index",
+        logger,
     )
     .with_context(|| format!("failed to execute {program} for package index download"))?;
     Ok(())
 }
 
 fn download_index(url: &str, cache_path: &Path) -> Result<()> {
+    let network_logger = NetworkBatchLogger::new();
     let parent = cache_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("invalid index cache path"))?;
@@ -175,24 +188,35 @@ fn download_index(url: &str, cache_path: &Path) -> Result<()> {
 
     let temp_path = cache_path.with_extension("download");
 
-    let mut download_errors = Vec::new();
-    if let Err(error) = run_curl_download(url, &temp_path) {
-        download_errors.push(error.to_string());
+    let result = (|| -> Result<()> {
+        let mut download_errors = Vec::new();
+        if let Err(error) = run_curl_download(url, &temp_path, &network_logger) {
+            download_errors.push(error.to_string());
 
-        #[cfg(windows)]
-        {
-            let mut downloaded = false;
-            for program in ["powershell", "pwsh"] {
-                match run_powershell_download(program, url, &temp_path) {
-                    Ok(()) => {
-                        downloaded = true;
-                        break;
+            #[cfg(windows)]
+            {
+                let mut downloaded = false;
+                for program in ["powershell", "pwsh"] {
+                    match run_powershell_download(program, url, &temp_path, &network_logger) {
+                        Ok(()) => {
+                            downloaded = true;
+                            break;
+                        }
+                        Err(error) => download_errors.push(error.to_string()),
                     }
-                    Err(error) => download_errors.push(error.to_string()),
+                }
+
+                if !downloaded {
+                    anyhow::bail!(
+                        "failed to download package index from '{}': {}",
+                        url,
+                        download_errors.join(" | ")
+                    );
                 }
             }
 
-            if !downloaded {
+            #[cfg(not(windows))]
+            {
                 anyhow::bail!(
                     "failed to download package index from '{}': {}",
                     url,
@@ -201,22 +225,24 @@ fn download_index(url: &str, cache_path: &Path) -> Result<()> {
             }
         }
 
-        #[cfg(not(windows))]
-        {
-            anyhow::bail!(
-                "failed to download package index from '{}': {}",
-                url,
-                download_errors.join(" | ")
-            );
+        fs::rename(&temp_path, cache_path).context("failed to update cached package index")?;
+        info!(
+            "downloaded package index to {}",
+            cache_path.to_string_lossy()
+        );
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            network_logger.finish_success()?;
+            Ok(())
+        }
+        Err(error) => {
+            network_logger.finish_failure();
+            Err(error)
         }
     }
-
-    fs::rename(&temp_path, cache_path).context("failed to update cached package index")?;
-    info!(
-        "downloaded package index to {}",
-        cache_path.to_string_lossy()
-    );
-    Ok(())
 }
 
 pub fn load_for_project(root: &Path, manifest: &WtrProject) -> Result<PackageIndex> {

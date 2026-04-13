@@ -88,12 +88,24 @@ pub(super) fn colorize_prefix(prefix: &str) -> String {
     styled.bold().to_string()
 }
 
-pub(super) fn colorize_state(state: ConcurrentLogState) -> String {
+pub(super) fn state_label(state: ConcurrentLogState) -> &'static str {
     match state {
-        ConcurrentLogState::Started => style("started").yellow().bold().to_string(),
-        ConcurrentLogState::Completed => style("completed").green().bold().to_string(),
-        ConcurrentLogState::Failed => style("failed").red().bold().to_string(),
-        ConcurrentLogState::Retrying => style("retrying").yellow().bold().to_string(),
+        ConcurrentLogState::Started => "started",
+        ConcurrentLogState::Completed => "completed",
+        ConcurrentLogState::Failed => "failed",
+        ConcurrentLogState::Retrying => "retrying",
+    }
+}
+
+pub(super) fn colorize_state(state: ConcurrentLogState) -> String {
+    let base = state_label(state);
+
+    match state {
+        ConcurrentLogState::Started | ConcurrentLogState::Retrying => {
+            style(base).yellow().bold().to_string()
+        }
+        ConcurrentLogState::Completed => style(base).green().bold().to_string(),
+        ConcurrentLogState::Failed => style(base).red().bold().to_string(),
     }
 }
 
