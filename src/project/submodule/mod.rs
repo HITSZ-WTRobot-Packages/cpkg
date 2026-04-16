@@ -657,6 +657,101 @@ mod tests {
     }
 
     #[test]
+    fn sync_repositories_initializes_many_fresh_clone_submodules() {
+        allow_file_protocol();
+
+        let base = make_temp_dir("fresh-clone");
+        let super_src = base.join("super-src");
+        fs::create_dir_all(super_src.join("Modules")).unwrap();
+        init_repo(&super_src);
+
+        let mut repositories = Vec::new();
+        let mut origin_paths = Vec::new();
+        for index in 1..=8 {
+            let name = format!("Repo{index}");
+            let origin = base.join(format!("origin-{index}"));
+            fs::create_dir_all(&origin).unwrap();
+            init_repo(&origin);
+            commit_file(&origin, "README.md", &format!("{name} v1\n"), "init");
+            run_git(&origin, &["branch", "-M", "main"]);
+
+            let origin_url = origin
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            let rel_path = format!("Modules/{name}");
+            run_git(
+                &super_src,
+                &[
+                    "-c",
+                    "protocol.file.allow=always",
+                    "submodule",
+                    "add",
+                    "-b",
+                    "main",
+                    &origin_url,
+                    &rel_path,
+                ],
+            );
+            repositories.push(ManagedRepository {
+                name,
+                url: origin_url,
+                rel_path,
+            });
+            origin_paths.push(origin);
+        }
+
+        run_git(&super_src, &["add", ".gitmodules", "Modules"]);
+        run_git(
+            &super_src,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add submodules",
+            ],
+        );
+        run_git(&super_src, &["branch", "-M", "main"]);
+
+        let super_bare = base.join("super-bare.git");
+        let super_src_url = super_src.to_string_lossy().into_owned();
+        let super_bare_url = super_bare.to_string_lossy().into_owned();
+        run_git(&base, &["clone", "--bare", &super_src_url, &super_bare_url]);
+
+        let clone_root = base.join("clone-root");
+        let clone_root_url = clone_root.to_string_lossy().into_owned();
+        run_git(&base, &["clone", &super_bare_url, &clone_root_url]);
+
+        let latest_commits = origin_paths
+            .iter()
+            .enumerate()
+            .map(|(index, origin)| {
+                commit_file(
+                    origin,
+                    "README.md",
+                    &format!("Repo{} v2\n", index + 1),
+                    "update",
+                )
+            })
+            .collect::<Vec<_>>();
+
+        sync_repositories(&clone_root, &repositories).unwrap();
+
+        for (repository, latest_commit) in repositories.iter().zip(latest_commits) {
+            let module_path = clone_root.join(&repository.rel_path);
+            assert_eq!(
+                current_branch(&module_path).unwrap().as_deref(),
+                Some("main")
+            );
+            assert_eq!(head_commit(&module_path), latest_commit);
+        }
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn sync_repository_switches_detached_submodule_back_to_main_before_pulling() {
         allow_file_protocol();
 

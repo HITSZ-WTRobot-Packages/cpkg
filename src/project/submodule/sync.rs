@@ -45,6 +45,13 @@ impl PendingSubmoduleSync {
         }
     }
 
+    fn initializes_submodule(&self) -> bool {
+        matches!(
+            self,
+            Self::Initialize { .. } | Self::InitializeOffline { .. }
+        )
+    }
+
     fn execute(self) -> Result<()> {
         match self {
             Self::Initialize {
@@ -259,19 +266,31 @@ pub(super) fn prepare_repository_sync(
 }
 
 pub(super) fn execute_pending_syncs(syncs: Vec<PendingSubmoduleSync>) -> Result<()> {
-    if syncs.is_empty() {
+    let mut parallel_syncs = Vec::new();
+    for sync in syncs {
+        if sync.initializes_submodule() {
+            sync.execute()?;
+        } else {
+            parallel_syncs.push(sync);
+        }
+    }
+
+    if parallel_syncs.is_empty() {
         return Ok(());
     }
 
-    if syncs.len() == 1 {
-        return syncs.into_iter().next().unwrap().execute();
+    if parallel_syncs.len() == 1 {
+        return parallel_syncs.into_iter().next().unwrap().execute();
     }
 
-    info!("synchronizing {} submodules in parallel", syncs.len());
+    info!(
+        "synchronizing {} submodules in parallel",
+        parallel_syncs.len()
+    );
 
     let mut errors = Vec::new();
     thread::scope(|scope| {
-        let handles = syncs
+        let handles = parallel_syncs
             .into_iter()
             .map(|sync| {
                 let repository_name = sync.repository_name().to_string();
