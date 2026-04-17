@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 
-use super::{CURRENT_FORMAT_VERSION, Cpkg};
+use super::{CURRENT_FORMAT_VERSION, Cpkg, default_package_version};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Format {
@@ -24,6 +24,18 @@ struct FormatProbe {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CurrentCpkg {
+    format_version: u32,
+    name: String,
+    pkgname: String,
+    #[serde(default = "default_package_version")]
+    version: String,
+    #[serde(default)]
+    dependencies: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LegacyPackageVersionCpkg {
     name: String,
     pkgname: String,
@@ -40,6 +52,18 @@ struct LegacyNamespaceCpkg {
 }
 
 struct LegacyPackageVersionMigration;
+
+impl From<CurrentCpkg> for Cpkg {
+    fn from(current: CurrentCpkg) -> Self {
+        Self {
+            format_version: current.format_version,
+            name: current.name,
+            pkgname: current.pkgname,
+            version: current.version,
+            dependencies: current.dependencies,
+        }
+    }
+}
 
 impl MigrationStep for LegacyPackageVersionMigration {
     fn from(&self) -> Format {
@@ -58,9 +82,9 @@ impl MigrationStep for LegacyPackageVersionMigration {
             format_version: CURRENT_FORMAT_VERSION,
             name: legacy.name,
             pkgname: legacy.pkgname,
+            version: legacy.version.unwrap_or_else(default_package_version),
             dependencies: legacy.dependencies.unwrap_or_default(),
         };
-        let _ = legacy.version;
         toml::to_string(&cpkg).map_err(Into::into)
     }
 }
@@ -84,6 +108,7 @@ impl MigrationStep for LegacyNamespaceMigration {
             format_version: CURRENT_FORMAT_VERSION,
             name: legacy.name.clone(),
             pkgname: format!("{}::{}", legacy.namespace, legacy.name),
+            version: default_package_version(),
             dependencies: legacy.deps.unwrap_or_default(),
         };
         toml::to_string(&cpkg).map_err(Into::into)
@@ -116,7 +141,7 @@ fn detect_format(content: &str) -> Option<Format> {
 }
 
 fn parse_current(content: &str) -> Result<Cpkg> {
-    let cpkg = toml::from_str::<Cpkg>(content)?;
+    let cpkg = Cpkg::from(toml::from_str::<CurrentCpkg>(content)?);
     if cpkg.format_version != CURRENT_FORMAT_VERSION {
         anyhow::bail!(
             "unsupported cpkg.toml format version {}",
@@ -193,6 +218,7 @@ dependencies = ["bsp::CANDriver"]
         assert!(migrated);
         assert_eq!(cpkg.format_version, CURRENT_FORMAT_VERSION);
         assert_eq!(cpkg.pkgname, "MotorDrivers::DJI");
+        assert_eq!(cpkg.version, "0.1.0");
         assert_eq!(cpkg.dependencies, vec!["bsp::CANDriver"]);
     }
 
@@ -210,6 +236,7 @@ deps = ["stm32cubemx"]
         assert!(migrated);
         assert_eq!(cpkg.format_version, CURRENT_FORMAT_VERSION);
         assert_eq!(cpkg.pkgname, "bsp::CANDriver");
+        assert_eq!(cpkg.version, "0.1.0");
         assert_eq!(cpkg.dependencies, vec!["stm32cubemx"]);
     }
 }

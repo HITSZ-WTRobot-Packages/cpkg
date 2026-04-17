@@ -18,6 +18,7 @@ fn default_package_manifest(pkgname: &str, dependencies: Vec<String>) -> Cpkg {
         format_version: CURRENT_FORMAT_VERSION,
         name: pkgname.split("::").last().unwrap_or(pkgname).to_string(),
         pkgname: pkgname.to_string(),
+        version: manifest::default_package_version(),
         dependencies,
     }
 }
@@ -79,4 +80,37 @@ pub fn generate(root: &Path) -> Result<()> {
         .write_to(&cpkg, &scanner, &root.join("CMakeLists.txt"))
         .context("failed to write CMakeLists.txt")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn make_temp_dir(prefix: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "cpkg-{prefix}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn create_writes_default_version_to_manifest() {
+        let dir = make_temp_dir("package-create");
+
+        create(&dir, "MotorDrivers::DJI").unwrap();
+
+        let manifest = fs::read_to_string(dir.join("MotorDrivers::DJI").join("cpkg.toml")).unwrap();
+        assert!(manifest.contains("version = \"0.1.0\""));
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }

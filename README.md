@@ -314,6 +314,7 @@ cpkg package generate
 format_version = 1
 name = "DJI"
 pkgname = "MotorDrivers::DJI"
+version = "0.1.0"
 dependencies = ["bsp::CANDriver"]
 ```
 
@@ -321,6 +322,7 @@ dependencies = ["bsp::CANDriver"]
 
 - `name`：包短名
 - `pkgname`：完整目标名，推荐使用 `Namespace::Name`
+- `version`：包版本，默认生成 `0.1.0`
 - `dependencies`：此包依赖的其他包目标
 
 ## 常见命令速查

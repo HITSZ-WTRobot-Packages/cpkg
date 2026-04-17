@@ -15,6 +15,8 @@ pub struct Cpkg {
     pub format_version: u32,
     pub name: String,
     pub pkgname: String,
+    #[serde(default = "default_package_version")]
+    pub version: String,
     #[serde(default)]
     pub dependencies: Vec<String>,
 }
@@ -23,12 +25,19 @@ fn default_format_version() -> u32 {
     CURRENT_FORMAT_VERSION
 }
 
+pub(crate) fn default_package_version() -> String {
+    "0.1.0".to_string()
+}
+
 fn normalize_dependencies(dependencies: &mut Vec<String>) {
     dependencies.sort();
     dependencies.dedup();
 }
 
 fn normalize_manifest(cpkg: &mut Cpkg) {
+    if cpkg.version.trim().is_empty() {
+        cpkg.version = default_package_version();
+    }
     normalize_dependencies(&mut cpkg.dependencies);
 }
 
@@ -89,15 +98,12 @@ dependencies = ["bsp::CANDriver", "services::Watchdog"]
 
         assert_eq!(cpkg.format_version, CURRENT_FORMAT_VERSION);
         assert_eq!(cpkg.pkgname, "MotorDrivers::DJI");
+        assert_eq!(cpkg.version, "0.1.0");
         assert_eq!(cpkg.dependencies.len(), 2);
 
         let migrated = fs::read_to_string(&path).unwrap();
         assert!(migrated.contains("format_version = 1"));
-        assert!(
-            !migrated
-                .lines()
-                .any(|line| line.trim_start().starts_with("version = "))
-        );
+        assert!(migrated.contains("version = \"0.1.0\""));
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -120,6 +126,7 @@ deps = ["stm32cubemx"]
 
         assert_eq!(cpkg.format_version, CURRENT_FORMAT_VERSION);
         assert_eq!(cpkg.pkgname, "bsp::CANDriver");
+        assert_eq!(cpkg.version, "0.1.0");
         assert_eq!(cpkg.dependencies, vec!["stm32cubemx"]);
 
         let _ = fs::remove_dir_all(dir);
