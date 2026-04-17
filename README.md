@@ -395,7 +395,7 @@ cpkg config index remove 1
 format_version = 1
 
 [[index]]
-url = "https://raw.githubusercontent.com/HITSZ-WTRobot-Packages/.github/main/cpkg_index.json"
+url = "https://raw.githubusercontent.com/HITSZ-WTRobot-Packages/index/refs/heads/main/cpkg_index.json"
 cache_path = "cpkg_index.json"
 
 [[index]]
@@ -425,7 +425,7 @@ format_version = 1
 default_org = "wtr-github"
 
 [[index]]
-url = "https://raw.githubusercontent.com/HITSZ-WTRobot-Packages/.github/main/cpkg_index.json"
+url = "https://raw.githubusercontent.com/HITSZ-WTRobot-Packages/index/refs/heads/main/cpkg_index.json"
 cache_path = "cpkg_index.json"
 
 [[org]]

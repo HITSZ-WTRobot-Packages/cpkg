@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -12,11 +13,10 @@ use crate::config::{
 use super::network::{NetworkBatchLogger, run_logged_command_in_batch};
 use super::{IndexSection, WtrProject};
 
-pub const DEFAULT_INDEX_URL: &str =
-    "https://raw.githubusercontent.com/HITSZ-WTRobot-Packages/.github/main/cpkg_index.json";
+pub const DEFAULT_INDEX_URL: &str = "https://raw.githubusercontent.com/HITSZ-WTRobot-Packages/index/refs/heads/main/cpkg_index.json";
 pub const DEFAULT_INDEX_FILENAME: &str = "cpkg_index.json";
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct PackageIndex {
     #[serde(default)]
     pub generated_at: Option<String>,
@@ -33,6 +33,118 @@ pub struct IndexedPackage {
     pub version: String,
     #[serde(default)]
     pub dependencies: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawPackageIndex {
+    Legacy(LegacyPackageIndex),
+    RepositoryMap(BTreeMap<String, Vec<RepositoryIndexedPackage>>),
+}
+
+#[derive(Deserialize)]
+struct LegacyPackageIndex {
+    #[serde(default)]
+    generated_at: Option<String>,
+    packages: Vec<LegacyIndexedPackage>,
+}
+
+#[derive(Deserialize)]
+struct LegacyIndexedPackage {
+    repo: String,
+    path: String,
+    name: String,
+    pkgname: String,
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    dependencies: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct RepositoryIndexedPackage {
+    path: String,
+    name: String,
+    pkgname: String,
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    dependencies: Vec<String>,
+}
+
+fn normalize_package_path(repo: &str, path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let trimmed = normalized.trim_start_matches("./").trim_start_matches('/');
+    let repo_root = format!("Modules/{repo}");
+
+    if trimmed == repo_root || trimmed.starts_with(&format!("{repo_root}/")) {
+        trimmed.to_string()
+    } else if trimmed.is_empty() {
+        repo_root
+    } else {
+        format!("{repo_root}/{trimmed}")
+    }
+}
+
+impl LegacyIndexedPackage {
+    fn into_indexed_package(self) -> IndexedPackage {
+        IndexedPackage {
+            repo: self.repo.clone(),
+            path: normalize_package_path(&self.repo, &self.path),
+            name: self.name,
+            pkgname: self.pkgname,
+            version: self.version,
+            dependencies: self.dependencies,
+        }
+    }
+}
+
+impl RepositoryIndexedPackage {
+    fn into_indexed_package(self, repo: &str) -> IndexedPackage {
+        IndexedPackage {
+            repo: repo.to_string(),
+            path: normalize_package_path(repo, &self.path),
+            name: self.name,
+            pkgname: self.pkgname,
+            version: self.version,
+            dependencies: self.dependencies,
+        }
+    }
+}
+
+impl RawPackageIndex {
+    fn into_package_index(self) -> PackageIndex {
+        match self {
+            Self::Legacy(index) => PackageIndex {
+                generated_at: index.generated_at,
+                packages: index
+                    .packages
+                    .into_iter()
+                    .map(LegacyIndexedPackage::into_indexed_package)
+                    .collect(),
+            },
+            Self::RepositoryMap(repositories) => PackageIndex {
+                generated_at: None,
+                packages: repositories
+                    .into_iter()
+                    .flat_map(|(repo, packages)| {
+                        packages
+                            .into_iter()
+                            .map(move |package| package.into_indexed_package(&repo))
+                    })
+                    .collect(),
+            },
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PackageIndex {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        RawPackageIndex::deserialize(deserializer).map(RawPackageIndex::into_package_index)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -479,11 +591,7 @@ mod tests {
     #[test]
     fn load_for_project_prefers_project_local_index() {
         let dir = make_temp_dir("project-local");
-        fs::write(
-            dir.join("cpkg_index.json"),
-            r#"{"generated_at":"2026-01-01T00:00:00Z","packages":[]}"#,
-        )
-        .unwrap();
+        fs::write(dir.join("cpkg_index.json"), r#"{}"#).unwrap();
 
         let index = load_for_project(&dir, &empty_manifest()).unwrap();
         assert!(index.packages.is_empty());
@@ -495,11 +603,7 @@ mod tests {
         let dir = make_temp_dir("configured-cache");
         let cache_path = dir.join("cache").join("cpkg_index.json");
         fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
-        fs::write(
-            &cache_path,
-            r#"{"generated_at":"2026-01-01T00:00:00Z","packages":[]}"#,
-        )
-        .unwrap();
+        fs::write(&cache_path, r#"{}"#).unwrap();
 
         let manifest = WtrProject {
             index: IndexSection {
@@ -522,11 +626,7 @@ mod tests {
         fs::create_dir_all(&global_dir).unwrap();
 
         let second_cache = global_dir.join("second.json");
-        fs::write(
-            &second_cache,
-            r#"{"generated_at":"2026-01-01T00:00:00Z","packages":[]}"#,
-        )
-        .unwrap();
+        fs::write(&second_cache, r#"{}"#).unwrap();
 
         let global_config = GlobalConfig {
             index: vec![
@@ -556,7 +656,7 @@ mod tests {
         assert_eq!(
             index,
             PackageIndex {
-                generated_at: Some("2026-01-01T00:00:00Z".to_string()),
+                generated_at: None,
                 packages: Vec::new(),
             }
         );
@@ -567,11 +667,7 @@ mod tests {
     fn explicit_project_index_overrides_global_sources() {
         let dir = make_temp_dir("project-overrides-global");
         let explicit = dir.join("explicit.json");
-        fs::write(
-            &explicit,
-            r#"{"generated_at":"2026-01-01T00:00:00Z","packages":[]}"#,
-        )
-        .unwrap();
+        fs::write(&explicit, r#"{}"#).unwrap();
 
         let manifest = WtrProject {
             index: IndexSection {
@@ -594,6 +690,90 @@ mod tests {
                 .unwrap();
 
         assert!(index.packages.is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn load_from_path_supports_repository_map_format() {
+        let dir = make_temp_dir("repository-map");
+        let path = dir.join("cpkg_index.json");
+        fs::write(
+            &path,
+            r#"{
+  "BasicComponents": [
+    {
+      "path":"bsp/can_driver",
+      "name":"CANDriver",
+      "pkgname":"bsp::CANDriver",
+      "version":"0.1.0",
+      "dependencies":["stm32cubemx"]
+    }
+  ],
+  "MotorDrivers": [
+    {
+      "path":"motors\\DJI",
+      "name":"DJI",
+      "pkgname":"MotorDrivers::DJI",
+      "version":"0.1.0",
+      "dependencies":["bsp::CANDriver"]
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let index = super::load_from_path(&path).unwrap();
+
+        assert_eq!(index.generated_at, None);
+        assert_eq!(index.packages.len(), 2);
+        assert!(
+            index
+                .packages
+                .iter()
+                .any(|package| package.repo == "BasicComponents"
+                    && package.path == "Modules/BasicComponents/bsp/can_driver")
+        );
+        assert!(
+            index
+                .packages
+                .iter()
+                .any(|package| package.repo == "MotorDrivers"
+                    && package.path == "Modules/MotorDrivers/motors/DJI")
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn load_from_path_keeps_support_for_legacy_flat_format() {
+        let dir = make_temp_dir("legacy-flat");
+        let path = dir.join("cpkg_index.json");
+        fs::write(
+            &path,
+            r#"{
+  "generated_at":"2026-01-01T00:00:00Z",
+  "packages":[
+    {
+      "repo":"BasicComponents",
+      "path":"bsp/can_driver",
+      "name":"CANDriver",
+      "pkgname":"bsp::CANDriver",
+      "version":"0.1.0",
+      "dependencies":["stm32cubemx"]
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let index = super::load_from_path(&path).unwrap();
+
+        assert_eq!(index.generated_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(index.packages.len(), 1);
+        assert_eq!(index.packages[0].repo, "BasicComponents");
+        assert_eq!(
+            index.packages[0].path,
+            "Modules/BasicComponents/bsp/can_driver"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 }

@@ -346,19 +346,18 @@ mod tests {
         fs::write(
             dir.join("cpkg_index.json"),
             r#"{
-  "generated_at":"2026-01-01T00:00:00Z",
-  "packages":[
+  "BasicComponents":[
     {
-      "repo":"BasicComponents",
-      "path":"Modules/BasicComponents/bsp/can_driver",
+      "path":"bsp/can_driver",
       "name":"CANDriver",
       "pkgname":"bsp::CANDriver",
       "version":"0.1.0",
       "dependencies":["stm32cubemx"]
-    },
+    }
+  ],
+  "MotorDrivers":[
     {
-      "repo":"MotorDrivers",
-      "path":"Modules/MotorDrivers/motors/DJI",
+      "path":"motors/DJI",
       "name":"DJI",
       "pkgname":"MotorDrivers::DJI",
       "version":"0.1.0",
@@ -428,19 +427,18 @@ mod tests {
 
     fn sample_index_json() -> &'static str {
         r#"{
-  "generated_at":"2026-01-01T00:00:00Z",
-  "packages":[
+  "BasicComponents":[
     {
-      "repo":"BasicComponents",
-      "path":"Modules/BasicComponents/bsp/can_driver",
+      "path":"bsp/can_driver",
       "name":"CANDriver",
       "pkgname":"bsp::CANDriver",
       "version":"0.1.0",
       "dependencies":["stm32cubemx"]
-    },
+    }
+  ],
+  "MotorDrivers":[
     {
-      "repo":"MotorDrivers",
-      "path":"Modules/MotorDrivers/motors/DJI",
+      "path":"motors/DJI",
       "name":"DJI",
       "pkgname":"MotorDrivers::DJI",
       "version":"0.1.0",
@@ -509,27 +507,23 @@ mod tests {
         fs::write(
             dir.join("cpkg_index.json"),
             r#"{
-  "generated_at":"2026-01-01T00:00:00Z",
-  "packages":[
+  "SharedRepo":[
     {
-      "repo":"SharedRepo",
-      "path":"Modules/SharedRepo/core",
+      "path":"core",
       "name":"Core",
       "pkgname":"SharedRepo::Core",
       "version":"0.1.0",
       "dependencies":[]
     },
     {
-      "repo":"SharedRepo",
-      "path":"Modules/SharedRepo/feature_a",
+      "path":"feature_a",
       "name":"FeatureA",
       "pkgname":"SharedRepo::FeatureA",
       "version":"0.1.0",
       "dependencies":["SharedRepo::Core"]
     },
     {
-      "repo":"SharedRepo",
-      "path":"Modules/SharedRepo/feature_b",
+      "path":"feature_b",
       "name":"FeatureB",
       "pkgname":"SharedRepo::FeatureB",
       "version":"0.1.0",
