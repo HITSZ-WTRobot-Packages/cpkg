@@ -21,10 +21,26 @@ jobs:
             runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: cpkg-linux-x86_64
+          - name: Linux (ARM64)
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact_name: cpkg-linux-aarch64
+          - name: macOS (Apple Silicon)
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: cpkg-macos-aarch64
+          - name: macOS (Intel)
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact_name: cpkg-macos-x86_64
           - name: Windows (MSVC)
             runner: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: cpkg-windows-x86_64-msvc
+          - name: Windows (ARM64)
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            artifact_name: cpkg-windows-aarch64-msvc
 
     steps:
       - name: Checkout source
@@ -41,11 +57,11 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.platform.target }}
 
-      - name: Package Linux archive
-        if: runner.os == 'Linux'
+      - name: Package Unix archive
+        if: runner.os != 'Windows'
         run: |
           VERSION="${GITHUB_REF_NAME}"
-          PACKAGE_DIR="dist/cpkg-${VERSION}-x86_64-unknown-linux-gnu"
+          PACKAGE_DIR="dist/cpkg-${VERSION}-${{ matrix.platform.target }}"
           mkdir -p "${PACKAGE_DIR}"
           cp "target/${{ matrix.platform.target }}/release/cpkg" "${PACKAGE_DIR}/"
           cp README.md LICENSE "${PACKAGE_DIR}/"
@@ -57,7 +73,7 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}"
-          $packageDir = "dist/cpkg-$version-x86_64-pc-windows-msvc"
+          $packageDir = "dist/cpkg-$version-${{ matrix.platform.target }}"
           New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
           Copy-Item "target/${{ matrix.platform.target }}/release/cpkg.exe" "$packageDir/cpkg.exe" -Force
           Copy-Item "README.md" "$packageDir/README.md" -Force

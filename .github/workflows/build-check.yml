@@ -43,9 +43,21 @@ jobs:
           - name: Linux
             runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          - name: Linux (ARM64)
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - name: macOS (Apple Silicon)
+            runner: macos-latest
+            target: aarch64-apple-darwin
+          - name: macOS (Intel)
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
           - name: Windows (MSVC)
             runner: windows-latest
             target: x86_64-pc-windows-msvc
+          - name: Windows (ARM64)
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
 
     steps:
       - name: Checkout source
