@@ -283,6 +283,10 @@ pub(super) fn execute_pending_syncs(syncs: Vec<PendingSubmoduleSync>) -> Result<
         return parallel_syncs.into_iter().next().unwrap().execute();
     }
 
+    if let PendingSubmoduleSync::Pull { logger, .. } = &parallel_syncs[0] {
+        logger.set_parallel_task_mode(true)?;
+    }
+
     info!(
         "synchronizing {} submodules in parallel",
         parallel_syncs.len()

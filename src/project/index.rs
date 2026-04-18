@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::{
     GlobalConfig, IndexSourceConfig, cpkg_home_dir, global_config_path, load_global_config,
@@ -438,12 +438,25 @@ fn download_index(url: &str, cache_path: &Path) -> Result<()> {
 
 fn load_source_with_refresh(source: &IndexSource) -> Result<PackageIndex> {
     match source {
-        IndexSource::Local { path, .. } => load_from_path(path),
+        IndexSource::Local { path, description } => {
+            debug!(
+                source = %description,
+                path = %path.display(),
+                "loading local package index"
+            );
+            load_from_path(path)
+        }
         IndexSource::Remote {
             url,
             cache_path,
             description,
         } => {
+            debug!(
+                source = %description,
+                url = %url,
+                cache_path = %cache_path.display(),
+                "refreshing remote package index"
+            );
             if let Err(error) = download_index(url, cache_path) {
                 if cache_path.exists() {
                     warn!(
@@ -461,12 +474,24 @@ fn load_source_with_refresh(source: &IndexSource) -> Result<PackageIndex> {
 
 fn load_source_without_refresh(source: &IndexSource) -> Result<PackageIndex> {
     match source {
-        IndexSource::Local { path, .. } => load_from_path(path),
+        IndexSource::Local { path, description } => {
+            debug!(
+                source = %description,
+                path = %path.display(),
+                "loading local package index without refresh"
+            );
+            load_from_path(path)
+        }
         IndexSource::Remote {
             cache_path,
             description,
             ..
         } => {
+            debug!(
+                source = %description,
+                cache_path = %cache_path.display(),
+                "loading cached package index"
+            );
             if !cache_path.exists() {
                 anyhow::bail!(
                     "no cached package index found for {} at '{}'",
@@ -482,6 +507,7 @@ fn load_source_without_refresh(source: &IndexSource) -> Result<PackageIndex> {
 fn load_from_selection(selection: SourceSelection, refresh: bool) -> Result<PackageIndex> {
     match selection {
         SourceSelection::Strict(source) => {
+            debug!(refresh, "using strict package index source");
             if refresh {
                 load_source_with_refresh(&source)
             } else {
@@ -491,6 +517,11 @@ fn load_from_selection(selection: SourceSelection, refresh: bool) -> Result<Pack
         SourceSelection::Fallback(sources) => {
             let mut errors = Vec::new();
             for source in sources {
+                let description = match &source {
+                    IndexSource::Local { description, .. } => description,
+                    IndexSource::Remote { description, .. } => description,
+                };
+                debug!(refresh, source = %description, "trying package index source");
                 let result = if refresh {
                     load_source_with_refresh(&source)
                 } else {
@@ -499,10 +530,6 @@ fn load_from_selection(selection: SourceSelection, refresh: bool) -> Result<Pack
                 match result {
                     Ok(index) => return Ok(index),
                     Err(error) => {
-                        let description = match &source {
-                            IndexSource::Local { description, .. } => description,
-                            IndexSource::Remote { description, .. } => description,
-                        };
                         errors.push(format!("{description}: {error}"));
                     }
                 }

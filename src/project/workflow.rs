@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::config;
 
@@ -74,6 +74,13 @@ fn resolve_project(
     index: &index::PackageIndex,
     options: SyncOptions,
 ) -> Result<ResolvedProject> {
+    debug!(
+        direct_dependency_count = manifest.dependencies.packages.len(),
+        indexed_package_count = index.packages.len(),
+        offline = options.offline,
+        submodule_protocol = ?options.submodule_protocol,
+        "resolving project dependency graph"
+    );
     let global_config = config::load_global_config()?;
     let org_source = source::resolve_org_source(manifest, &global_config)?;
     let protocol = source::effective_protocol(&org_source, options.submodule_protocol)?;
@@ -90,6 +97,12 @@ fn load_index_for_sync(
     manifest: &WtrProject,
     options: SyncOptions,
 ) -> Result<index::PackageIndex> {
+    debug!(
+        offline = options.offline,
+        direct_dependency_count = manifest.dependencies.packages.len(),
+        root = %root.display(),
+        "loading package index for project"
+    );
     if options.offline {
         index::load_for_project_without_refresh(root, manifest)
     } else {
@@ -133,6 +146,14 @@ fn finish_sync(
     resolved: &ResolvedProject,
     options: SyncOptions,
 ) -> Result<SyncSummary> {
+    debug!(
+        root = %root.display(),
+        direct_dependency_count = manifest.dependencies.packages.len(),
+        resolved_package_count = resolved.managed_packages.len(),
+        repository_count = resolved.repositories.len(),
+        offline = options.offline,
+        "applying synchronized dependency state"
+    );
     let previous_repositories = integration::read_managed_repositories(root)?;
     validate_stm32_project(root, manifest)?;
     submodule::sync_repositories_with_options(root, &resolved.repositories, options.offline)?;
@@ -158,6 +179,12 @@ fn refresh_project_links(
     manifest: &WtrProject,
     options: SyncOptions,
 ) -> Result<PathBuf> {
+    debug!(
+        root = %root.display(),
+        direct_dependency_count = manifest.dependencies.packages.len(),
+        offline = options.offline,
+        "refreshing generated integration links"
+    );
     let previous_repositories = integration::read_managed_repositories(root)?;
     let resolved = resolved_project_for_integration(root, manifest, options)?;
     let path = integration::write_integration_file(root, &resolved)?;
@@ -170,6 +197,12 @@ fn add_then_sync(
     packages: &[String],
     options: SyncOptions,
 ) -> Result<(WtrProject, Option<DeferredAddSync>)> {
+    debug!(
+        package_count = packages.len(),
+        offline = options.offline,
+        submodule_protocol = ?options.submodule_protocol,
+        "adding packages and synchronizing project"
+    );
     if packages.is_empty() {
         return Ok((load(root)?, None));
     }
@@ -201,6 +234,13 @@ fn apply_interactive_selection(
     index: &index::PackageIndex,
     options: SyncOptions,
 ) -> Result<(WtrProject, DependencyEditSummary, Option<DeferredAddSync>)> {
+    debug!(
+        previous_dependency_count = manifest.dependencies.packages.len(),
+        selected_dependency_count = selected_packages.len(),
+        indexed_package_count = index.packages.len(),
+        offline = options.offline,
+        "applying interactive dependency selection"
+    );
     let summary =
         super::updates::dependency_edit_summary(&manifest.dependencies.packages, selected_packages);
     let mut updated_manifest = manifest.clone();
@@ -219,6 +259,12 @@ fn apply_interactive_selection(
 }
 
 pub fn sync(root: &Path, options: SyncOptions) -> Result<SyncSummary> {
+    debug!(
+        root = %root.display(),
+        offline = options.offline,
+        submodule_protocol = ?options.submodule_protocol,
+        "starting project sync"
+    );
     let manifest = load(root)?;
     validate_stm32_project(root, &manifest)?;
 
@@ -228,6 +274,13 @@ pub fn sync(root: &Path, options: SyncOptions) -> Result<SyncSummary> {
 }
 
 pub fn add_and_sync(root: &Path, packages: &[String], options: SyncOptions) -> Result<WtrProject> {
+    debug!(
+        root = %root.display(),
+        package_count = packages.len(),
+        offline = options.offline,
+        submodule_protocol = ?options.submodule_protocol,
+        "starting add-and-sync workflow"
+    );
     let (manifest, deferred_sync) = add_then_sync(root, packages, options)?;
     if let Some(deferred_sync) = deferred_sync {
         write_deferred_add_sync_notice(&deferred_sync, options)?;
@@ -236,6 +289,11 @@ pub fn add_and_sync(root: &Path, packages: &[String], options: SyncOptions) -> R
 }
 
 pub fn remove(root: &Path, packages: &[String]) -> Result<WtrProject> {
+    debug!(
+        root = %root.display(),
+        package_count = packages.len(),
+        "starting package removal workflow"
+    );
     if packages.is_empty() {
         anyhow::bail!("no packages provided");
     }
@@ -270,6 +328,13 @@ pub fn remove(root: &Path, packages: &[String]) -> Result<WtrProject> {
 }
 
 pub fn init_interactive(root: &Path, options: ProjectInitOptions) -> Result<Option<WtrProject>> {
+    debug!(
+        root = %root.display(),
+        force = options.force,
+        has_explicit_name = options.name.is_some(),
+        has_explicit_ioc = options.ioc.is_some(),
+        "starting interactive project init"
+    );
     let mut manifest = manifest::prepare_init(root, &options)?;
     let index = index::load_for_project(root, &manifest)?;
     match interactive::select_dependencies(&index)? {
@@ -287,6 +352,13 @@ pub fn add_interactive(
     explicit_packages: &[String],
     options: SyncOptions,
 ) -> Result<WtrProject> {
+    debug!(
+        root = %root.display(),
+        explicit_package_count = explicit_packages.len(),
+        offline = options.offline,
+        submodule_protocol = ?options.submodule_protocol,
+        "starting interactive add workflow"
+    );
     let manifest = load(root)?;
     let previous_packages = manifest.dependencies.packages.clone();
     let index = load_index_for_sync(root, &manifest, options)?;

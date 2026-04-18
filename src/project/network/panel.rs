@@ -3,6 +3,7 @@ use console::{Term, style};
 use std::io::{BufRead, BufReader, Read};
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread;
+use tracing::debug;
 
 use super::ConcurrentLogState;
 use super::format::{colorize_prefix, colorize_state, fit_to_width, state_label};
@@ -30,6 +31,7 @@ struct GroupedTask {
     state: ConcurrentLogState,
     status_message: Option<String>,
     recent_lines: Vec<String>,
+    debug_lines: Vec<String>,
 }
 
 impl GroupedTask {
@@ -42,6 +44,7 @@ impl GroupedTask {
             state: ConcurrentLogState::Started,
             status_message: None,
             recent_lines: Vec::new(),
+            debug_lines: Vec::new(),
         }
     }
 
@@ -50,7 +53,9 @@ impl GroupedTask {
             StreamKind::Stdout => "stdout",
             StreamKind::Stderr => "stderr",
         };
-        self.recent_lines.push(format!("{prefix}: {line}"));
+        let formatted = format!("{prefix}: {line}");
+        self.recent_lines.push(formatted.clone());
+        self.debug_lines.push(formatted);
         if self.recent_lines.len() > PANEL_MAX_LOG_LINES {
             let overflow = self.recent_lines.len() - PANEL_MAX_LOG_LINES;
             self.recent_lines.drain(0..overflow);
@@ -97,12 +102,71 @@ impl GroupedTask {
     }
 }
 
+#[derive(Debug, Clone)]
+struct CompletedTaskDebugSnapshot {
+    label: String,
+    title: String,
+    command: String,
+    state: ConcurrentLogState,
+    status_message: Option<String>,
+    log_lines: Vec<String>,
+}
+
+impl From<&GroupedTask> for CompletedTaskDebugSnapshot {
+    fn from(task: &GroupedTask) -> Self {
+        Self {
+            label: task.label.clone(),
+            title: task.title.clone(),
+            command: task.command.clone(),
+            state: task.state,
+            status_message: task.status_message.clone(),
+            log_lines: task.debug_lines.clone(),
+        }
+    }
+}
+
+fn task_completion_debug_message(task: &CompletedTaskDebugSnapshot) -> String {
+    match task.state {
+        ConcurrentLogState::Started | ConcurrentLogState::Completed => task.title.clone(),
+        ConcurrentLogState::Retrying | ConcurrentLogState::Failed => task
+            .status_message
+            .clone()
+            .unwrap_or_else(|| task.title.clone()),
+    }
+}
+
+fn emit_task_completion_debug_logs(task: &CompletedTaskDebugSnapshot) {
+    debug!(
+        target: "cpkg::network",
+        label = %task.label,
+        state = state_label(task.state),
+        title = %task.title,
+        command = %task.command,
+        summary = %task_completion_debug_message(task),
+        "network task finished"
+    );
+
+    if task.log_lines.is_empty() {
+        debug!(
+            target: "cpkg::network",
+            label = %task.label,
+            "no network task output captured"
+        );
+        return;
+    }
+
+    for line in &task.log_lines {
+        debug!(target: "cpkg::network", label = %task.label, "{line}");
+    }
+}
+
 #[derive(Debug)]
 struct GroupedLogState {
     is_tty: bool,
     cursor_hidden: bool,
     rendered_lines: usize,
     next_task_id: usize,
+    parallel_task_mode: bool,
     tasks: Vec<GroupedTask>,
     recent_lines: Vec<String>,
     last_updated_task_id: Option<usize>,
@@ -115,6 +179,7 @@ impl GroupedLogState {
             cursor_hidden: false,
             rendered_lines: 0,
             next_task_id: 0,
+            parallel_task_mode: false,
             tasks: Vec::new(),
             recent_lines: Vec::new(),
             last_updated_task_id: None,
@@ -185,24 +250,49 @@ impl GroupedLogState {
         Ok(())
     }
 
+    fn set_parallel_task_mode(&mut self, enabled: bool) {
+        self.parallel_task_mode = enabled;
+    }
+
+    fn should_replay_task_debug_logs(&self, state: ConcurrentLogState) -> bool {
+        self.parallel_task_mode
+            && matches!(
+                state,
+                ConcurrentLogState::Completed | ConcurrentLogState::Failed
+            )
+            && tracing::enabled!(target: "cpkg::network", tracing::Level::DEBUG)
+    }
+
     fn update_task_state(
         &mut self,
         task_id: usize,
         state: ConcurrentLogState,
         message: Option<String>,
     ) -> Result<()> {
-        let Some((label, title, command)) = ({
+        let replay_debug_logs = self.should_replay_task_debug_logs(state);
+        let Some((label, title, command, debug_snapshot)) = ({
             let Some(task) = self.task_mut(task_id) else {
                 return Ok(());
             };
             task.set_state(state, message.clone());
-            Some((task.label.clone(), task.title.clone(), task.command.clone()))
+            Some((
+                task.label.clone(),
+                task.title.clone(),
+                task.command.clone(),
+                replay_debug_logs.then(|| CompletedTaskDebugSnapshot::from(&*task)),
+            ))
         }) else {
             return Ok(());
         };
         self.last_updated_task_id = Some(task_id);
 
         if self.is_tty {
+            if debug_snapshot.is_some() {
+                self.clear_rendered()?;
+                if let Some(snapshot) = &debug_snapshot {
+                    emit_task_completion_debug_logs(snapshot);
+                }
+            }
             self.render()?;
         } else {
             let text = match state {
@@ -218,6 +308,9 @@ impl GroupedLogState {
                     colorize_prefix(&label),
                     style(format!("$ {}", command)).dim()
                 ))?;
+            }
+            if let Some(snapshot) = &debug_snapshot {
+                emit_task_completion_debug_logs(snapshot);
             }
         }
 
@@ -261,6 +354,7 @@ impl GroupedLogState {
         self.recent_lines.clear();
         self.last_updated_task_id = None;
         self.next_task_id = 0;
+        self.parallel_task_mode = false;
     }
 
     fn ensure_cursor_hidden(&mut self) -> Result<()> {
@@ -292,6 +386,7 @@ impl GroupedLogState {
         self.recent_lines.clear();
         self.last_updated_task_id = None;
         self.next_task_id = 0;
+        self.parallel_task_mode = false;
     }
 
     fn render(&mut self) -> Result<()> {
@@ -474,6 +569,11 @@ impl NetworkBatchLogger {
             .update_task_state_by_label(label, ConcurrentLogState::Retrying, message)
     }
 
+    pub(crate) fn set_parallel_task_mode(&self, enabled: bool) -> Result<()> {
+        self.lock_state()?.set_parallel_task_mode(enabled);
+        Ok(())
+    }
+
     pub(crate) fn finish_success(&self) -> Result<()> {
         self.lock_state()?.finish_success()
     }
@@ -560,7 +660,10 @@ pub(super) fn join_reader(
 
 #[cfg(test)]
 mod tests {
-    use super::{GroupedTask, PANEL_MAX_LOG_LINES, StreamKind};
+    use super::{
+        CompletedTaskDebugSnapshot, GroupedTask, PANEL_MAX_LOG_LINES, StreamKind,
+        task_completion_debug_message,
+    };
     use crate::project::network::ConcurrentLogState;
 
     #[test]
@@ -585,6 +688,36 @@ mod tests {
 
         assert_eq!(task.recent_lines.len(), PANEL_MAX_LOG_LINES);
         assert_eq!(task.recent_lines.first().unwrap(), "stderr: line-2");
+    }
+
+    #[test]
+    fn grouped_task_debug_lines_keep_full_history_for_replay() {
+        let mut task = GroupedTask::new(0, "TrajectoryControl", "pull", "git pull");
+        for index in 0..(PANEL_MAX_LOG_LINES + 2) {
+            task.push_line(StreamKind::Stderr, &format!("line-{index}"));
+        }
+
+        let snapshot = CompletedTaskDebugSnapshot::from(&task);
+
+        assert_eq!(snapshot.log_lines.len(), PANEL_MAX_LOG_LINES + 2);
+        assert_eq!(snapshot.log_lines.first().unwrap(), "stderr: line-0");
+        assert_eq!(snapshot.log_lines.last().unwrap(), "stderr: line-7");
+    }
+
+    #[test]
+    fn task_completion_debug_message_prefers_status_message_for_failed_task() {
+        let mut task = GroupedTask::new(0, "TrajectoryControl", "pull", "git pull");
+        task.set_state(
+            ConcurrentLogState::Failed,
+            Some("pull failed once; retrying".to_string()),
+        );
+
+        let snapshot = CompletedTaskDebugSnapshot::from(&task);
+
+        assert_eq!(
+            task_completion_debug_message(&snapshot),
+            "pull failed once; retrying"
+        );
     }
 
     #[test]

@@ -1,6 +1,8 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::Path;
+use tracing::debug;
+use tracing_subscriber::EnvFilter;
 
 use cpkg::{
     IndexSourceConfig, ProjectInitOptions, SubmoduleProtocol, SyncOptions, add_global_index_source,
@@ -22,13 +24,15 @@ The project-side workflow uses `wtrproject.toml` to track direct dependencies, \
 downloads a package index, resolves transitive dependencies, and synchronizes \
 driver repositories into `Modules/` as Git submodules.\n\n\
 Package-authoring commands stay under `cpkg package ...` and continue to manage \
-individual driver-package metadata with `cpkg.toml`.",
+individual driver-package metadata with `cpkg.toml`.\n\n\
+Use `-v` or `--verbose` to enable debug logging.",
     after_help = "Examples:\n  \
 cpkg init --ioc MyBoard.ioc\n  \
 cpkg init -I\n  \
 cpkg add MotorDrivers::DJI bsp::CANDriver\n  \
 cpkg add --offline MotorDrivers::DJI\n  \
 cpkg add -I --submodule-protocol https\n  \
+cpkg -v sync\n  \
 cpkg sync --submodule-protocol ssh\n  \
 cpkg sync --offline\n  \
 cpkg config init\n  \
@@ -40,6 +44,9 @@ cpkg config org set wtr-github --default-protocol https\n  \
 cpkg package init MotorDrivers::DJI --deps bsp::CANDriver"
 )]
 struct Cli {
+    /// Enable debug logging output.
+    #[arg(short, long, global = true)]
+    verbose: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -352,10 +359,23 @@ enum PackageCommands {
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+    init_tracing(cli.verbose)?;
+    debug!(
+        command = command_name(&cli.command),
+        verbose = cli.verbose,
+        "starting cpkg"
+    );
     let cwd = Path::new(".");
 
     match cli.command {
         Commands::Init(args) => {
+            debug!(
+                interactive = args.interactive,
+                force = args.force,
+                has_explicit_name = args.name.is_some(),
+                has_explicit_ioc = args.ioc.is_some(),
+                "running init command"
+            );
             let options = ProjectInitOptions {
                 force: args.force,
                 name: args.name,
@@ -371,6 +391,13 @@ pub fn run() -> Result<()> {
             }
         }
         Commands::Add(args) => {
+            debug!(
+                interactive = args.interactive,
+                package_count = args.packages.len(),
+                offline = args.sync.offline,
+                submodule_protocol = ?args.sync.submodule_protocol,
+                "running add command"
+            );
             if args.interactive {
                 add_packages_interactive(cwd, &args.packages, args.sync.into())?;
             } else {
@@ -378,36 +405,90 @@ pub fn run() -> Result<()> {
             }
         }
         Commands::Remove(args) => {
+            debug!(
+                package_count = args.packages.len(),
+                "running remove command"
+            );
             remove_packages(cwd, &args.packages)?;
         }
         Commands::Sync(args) => {
+            debug!(
+                offline = args.sync.offline,
+                submodule_protocol = ?args.sync.submodule_protocol,
+                "running sync command"
+            );
             sync_project(cwd, args.sync.into())?;
         }
         Commands::Config { command } => match command {
-            ConfigCommands::Init(args) => init_global_config(args.force)?,
-            ConfigCommands::Show => show_global_config()?,
+            ConfigCommands::Init(args) => {
+                debug!(force = args.force, "running config init command");
+                init_global_config(args.force)?
+            }
+            ConfigCommands::Show => {
+                debug!("running config show command");
+                show_global_config()?
+            }
             ConfigCommands::Index { command } => match command {
-                IndexConfigCommands::List => show_global_index_sources()?,
+                IndexConfigCommands::List => {
+                    debug!("running config index list command");
+                    show_global_index_sources()?
+                }
                 IndexConfigCommands::Add(args) => {
+                    debug!(
+                        position = ?args.position,
+                        uses_path = args.source.path.is_some(),
+                        uses_url = args.source.url.is_some(),
+                        "running config index add command"
+                    );
                     add_global_index_source(args.source.into(), args.position)?
                 }
                 IndexConfigCommands::Set(args) => {
+                    debug!(
+                        position = args.position,
+                        uses_path = args.source.path.is_some(),
+                        uses_url = args.source.url.is_some(),
+                        "running config index set command"
+                    );
                     set_global_index_source(args.position, args.source.into())?
                 }
-                IndexConfigCommands::Remove { position } => remove_global_index_source(position)?,
-                IndexConfigCommands::Move { from, to } => move_global_index_source(from, to)?,
+                IndexConfigCommands::Remove { position } => {
+                    debug!(position, "running config index remove command");
+                    remove_global_index_source(position)?
+                }
+                IndexConfigCommands::Move { from, to } => {
+                    debug!(from, to, "running config index move command");
+                    move_global_index_source(from, to)?
+                }
             },
             ConfigCommands::Org { command } => match command {
-                OrgConfigCommands::Set(args) => set_global_org_source(
-                    &args.name,
-                    args.ssh_base,
-                    args.https_base,
-                    args.default_protocol.map(Into::into),
-                )?,
-                OrgConfigCommands::Remove { name } => remove_global_org_source(&name)?,
+                OrgConfigCommands::Set(args) => {
+                    debug!(
+                        name = %args.name,
+                        has_ssh_base = args.ssh_base.is_some(),
+                        has_https_base = args.https_base.is_some(),
+                        default_protocol = ?args.default_protocol,
+                        "running config org set command"
+                    );
+                    set_global_org_source(
+                        &args.name,
+                        args.ssh_base,
+                        args.https_base,
+                        args.default_protocol.map(Into::into),
+                    )?
+                }
+                OrgConfigCommands::Remove { name } => {
+                    debug!(name = %name, "running config org remove command");
+                    remove_global_org_source(&name)?
+                }
                 OrgConfigCommands::Default { command } => match command {
-                    DefaultOrgConfigCommands::Set { name } => set_global_default_org_source(&name)?,
-                    DefaultOrgConfigCommands::Clear => clear_global_default_org_source()?,
+                    DefaultOrgConfigCommands::Set { name } => {
+                        debug!(name = %name, "running config org default set command");
+                        set_global_default_org_source(&name)?
+                    }
+                    DefaultOrgConfigCommands::Clear => {
+                        debug!("running config org default clear command");
+                        clear_global_default_org_source()?
+                    }
                 },
             },
         },
@@ -416,13 +497,49 @@ pub fn run() -> Result<()> {
                 pkgname,
                 force,
                 deps,
-            } => init_package(cwd, &pkgname, force, &deps)?,
-            PackageCommands::Generate => generate_package(cwd)?,
-            PackageCommands::Create { package_name } => create_package(cwd, &package_name)?,
+            } => {
+                debug!(
+                    pkgname = %pkgname,
+                    force,
+                    dependency_count = deps.len(),
+                    "running package init command"
+                );
+                init_package(cwd, &pkgname, force, &deps)?
+            }
+            PackageCommands::Generate => {
+                debug!("running package generate command");
+                generate_package(cwd)?
+            }
+            PackageCommands::Create { package_name } => {
+                debug!(package_name = %package_name, "running package create command");
+                create_package(cwd, &package_name)?
+            }
         },
     }
 
     Ok(())
+}
+
+fn init_tracing(verbose: bool) -> Result<()> {
+    let default_level = if verbose { "debug" } else { "info" };
+    let default_filter = format!("{}={default_level}", env!("CARGO_PKG_NAME"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .try_init()
+        .map_err(|error| anyhow::anyhow!("failed to initialize tracing subscriber: {error}"))
+}
+
+fn command_name(command: &Commands) -> &'static str {
+    match command {
+        Commands::Init(_) => "init",
+        Commands::Add(_) => "add",
+        Commands::Remove(_) => "remove",
+        Commands::Sync(_) => "sync",
+        Commands::Config { .. } => "config",
+        Commands::Package { .. } => "package",
+    }
 }
 
 #[cfg(test)]
@@ -431,7 +548,26 @@ mod tests {
         Cli, Commands, ConfigCommands, DefaultOrgConfigCommands, IndexConfigCommands,
         OrgConfigCommands,
     };
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn help_mentions_global_verbose_flag() {
+        let help = Cli::command().render_long_help().to_string();
+
+        assert!(help.contains("-v, --verbose"));
+        assert!(help.contains("enable debug logging"));
+    }
+
+    #[test]
+    fn sync_accepts_global_verbose_flag_after_subcommand() {
+        let cli = Cli::try_parse_from(["cpkg", "sync", "-v"]).unwrap();
+
+        assert!(cli.verbose);
+        match cli.command {
+            Commands::Sync(args) => assert!(!args.sync.offline),
+            _ => panic!("expected sync command"),
+        }
+    }
 
     #[test]
     fn add_accepts_offline_sync_option() {
