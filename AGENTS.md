@@ -179,6 +179,10 @@ When a change needs to fetch a new crate, refresh `Cargo.lock`, or otherwise upd
 - Keep commits scoped to one change.
 - Use commit messages in `type(scope): content` form, for example `docs(cli): expand command help text`.
 - Disable GPG signing for local commits with `git -c commit.gpgsign=false commit ...`.
+- When the user asks to create a Git tag, first bump the project version and commit that version change before creating the tag.
+- Git tags should use the format `v${version}[-${tag}${number}]`.
+- For a new release, prefer `v${version}` without any suffix.
+- For an update released under the same version, use the suffix form `-fix{i}`, for example `v0.2.5-fix1`.
 - PRs should explain user-visible impact, list verification commands run, and include sample CLI output when command behavior changes.
 
 ### Tooling Notes
