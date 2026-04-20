@@ -87,6 +87,7 @@ cargo build --release
 项目侧命令如下：
 
 - `cpkg init`
+- `cpkg list`
 - `cpkg add`
 - `cpkg remove`
 - `cpkg sync`
@@ -128,7 +129,25 @@ cpkg init -I
 
 初始化后会生成 `wtrproject.toml`。
 
-### 2. 添加直接依赖
+### 2. 查看可用包
+
+```bash
+cpkg list
+```
+
+如果你只想使用本地或缓存索引，不刷新远程索引：
+
+```bash
+cpkg list --offline
+```
+
+说明：
+
+- `cpkg list` 会按仓库分组，以树状列出当前索引中的所有包
+- 如果当前目录存在 `wtrproject.toml`，会沿用项目配置的索引解析顺序
+- 如果当前目录没有 `wtrproject.toml`，会回退到本地 `cpkg_index.json`、全局索引源或内置默认索引
+
+### 3. 添加直接依赖
 
 ```bash
 cpkg add MotorDrivers::DJI bsp::CANDriver
@@ -155,7 +174,7 @@ cpkg add -I
 - 如果项目未显式设置 `[org].name`，则会优先使用全局 `config.toml` 中的 `default_org`
 - 如果不显式传入 `--submodule-protocol`，则优先使用项目 `[org]` 的 `protocol`，再回退到命名全局 org 源的 `default_protocol`，最后回退到内置默认 `ssh`
 
-### 3. 从项目中移除直接依赖
+### 4. 从项目中移除直接依赖
 
 ```bash
 cpkg remove MotorDrivers::DJI
@@ -168,7 +187,7 @@ cpkg remove MotorDrivers::DJI
 - 会删除不再需要的受管仓库
 - 不会重新同步保留中的 submodule
 
-### 4. 重新同步依赖
+### 5. 重新同步依赖
 
 ```bash
 cpkg sync
@@ -330,6 +349,7 @@ dependencies = ["bsp::CANDriver"]
 ```bash
 cpkg --help
 cpkg init --help
+cpkg list --help
 cpkg add --help
 cpkg remove --help
 cpkg sync --help

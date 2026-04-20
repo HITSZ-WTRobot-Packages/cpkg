@@ -8,9 +8,9 @@ use cpkg::{
     IndexSourceConfig, ProjectInitOptions, SubmoduleProtocol, SyncOptions, add_global_index_source,
     add_packages_and_sync, add_packages_interactive, clear_global_default_org_source,
     create_package, generate_package, init_global_config, init_package, init_project,
-    init_project_interactive, move_global_index_source, project::write_init_integration_guidance,
-    remove_global_index_source, remove_global_org_source, remove_packages,
-    set_global_default_org_source, set_global_index_source, set_global_org_source,
+    init_project_interactive, list_available_packages, move_global_index_source,
+    project::write_init_integration_guidance, remove_global_index_source, remove_global_org_source,
+    remove_packages, set_global_default_org_source, set_global_index_source, set_global_org_source,
     show_global_config, show_global_index_sources, sync_project,
 };
 
@@ -29,6 +29,8 @@ Use `-v` or `--verbose` to enable debug logging.",
     after_help = "Examples:\n  \
 cpkg init --ioc MyBoard.ioc\n  \
 cpkg init -I\n  \
+cpkg list\n  \
+cpkg list --offline\n  \
 cpkg add MotorDrivers::DJI bsp::CANDriver\n  \
 cpkg add --offline MotorDrivers::DJI\n  \
 cpkg add -I --submodule-protocol https\n  \
@@ -55,6 +57,8 @@ struct Cli {
 enum Commands {
     /// Initialize `wtrproject.toml` for the current STM32CubeMX project.
     Init(ProjectInitArgs),
+    /// List all packages from the active package index in a tree view.
+    List(ListArgs),
     /// Add direct dependencies, or edit them interactively, and synchronize `Modules/`.
     Add(AddArgs),
     /// Remove direct package dependencies and refresh local project links.
@@ -149,6 +153,22 @@ and call `wtr_link_packages(<target>)` or `wtr_link_packages_public(<target>)`."
 struct SyncArgs {
     #[command(flatten)]
     sync: SyncOptionArgs,
+}
+
+#[derive(Args)]
+#[command(
+    about = "List all packages from the active package index in a tree view",
+    after_help = "Examples:\n  \
+cpkg list\n  \
+cpkg list --offline\n\n\
+When `wtrproject.toml` exists, this command uses the same package-index lookup order as \
+other project commands. Otherwise it falls back to a project-local `cpkg_index.json`, \
+configured global index sources, or the built-in default index."
+)]
+struct ListArgs {
+    /// Use the project-local or cached package index and skip remote refresh.
+    #[arg(long)]
+    offline: bool,
 }
 
 #[derive(Args, Clone, Copy)]
@@ -390,6 +410,10 @@ pub fn run() -> Result<()> {
                 write_init_integration_guidance(&manifest)?;
             }
         }
+        Commands::List(args) => {
+            debug!(offline = args.offline, "running list command");
+            list_available_packages(cwd, args.offline)?;
+        }
         Commands::Add(args) => {
             debug!(
                 interactive = args.interactive,
@@ -534,6 +558,7 @@ fn init_tracing(verbose: bool) -> Result<()> {
 fn command_name(command: &Commands) -> &'static str {
     match command {
         Commands::Init(_) => "init",
+        Commands::List(_) => "list",
         Commands::Add(_) => "add",
         Commands::Remove(_) => "remove",
         Commands::Sync(_) => "sync",
@@ -580,6 +605,16 @@ mod tests {
                 assert_eq!(args.packages, vec!["MotorDrivers::DJI"]);
             }
             _ => panic!("expected add command"),
+        }
+    }
+
+    #[test]
+    fn list_accepts_offline_flag() {
+        let cli = Cli::try_parse_from(["cpkg", "list", "--offline"]).unwrap();
+
+        match cli.command {
+            Commands::List(args) => assert!(args.offline),
+            _ => panic!("expected list command"),
         }
     }
 
@@ -727,5 +762,13 @@ mod tests {
             } => assert_eq!(name, "mirror"),
             _ => panic!("expected config org default set command"),
         }
+    }
+
+    #[test]
+    fn help_mentions_list_examples() {
+        let help = Cli::command().render_long_help().to_string();
+
+        assert!(help.contains("cpkg list"));
+        assert!(help.contains("tree view"));
     }
 }

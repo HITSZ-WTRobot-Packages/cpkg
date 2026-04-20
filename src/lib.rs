@@ -16,5 +16,6 @@ pub use project::{
     ProjectInitOptions, SubmoduleProtocol, SyncOptions, SyncSummary, WtrProject,
     add as add_packages, add_and_sync as add_packages_and_sync,
     add_interactive as add_packages_interactive, init as init_project,
-    init_interactive as init_project_interactive, remove as remove_packages, sync as sync_project,
+    init_interactive as init_project_interactive, list_available_packages,
+    remove as remove_packages, sync as sync_project,
 };
