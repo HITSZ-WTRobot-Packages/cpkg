@@ -1,0 +1,4 @@
+interface:
+  display_name: "cpkg"
+  short_description: "Manage WTR projects and driver packages"
+  default_prompt: "Use $cpkg to detect, initialize, or manage a WTR project or driver package with the cpkg CLI."

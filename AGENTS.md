@@ -50,6 +50,7 @@ When changing CLI behavior, update the help text in `src/main.rs` and verify the
 ### Repository Layout
 - Keep CLI wiring in `src/main.rs` thin.
 - Put reusable logic under `src/lib.rs`, `src/project/`, and `src/package/`.
+- Keep distributable user-facing agent skills under `skills/`.
 - Build artifacts belong under `target/` and should remain untracked.
 
 `src/project/` owns STM32CubeMX project management:
@@ -188,4 +189,8 @@ When a change needs to fetch a new crate, refresh `Cargo.lock`, or otherwise upd
 ### Tooling Notes
 - Prefer updating package metadata through `cpkg package init`, `cpkg package generate`, and `cpkg package create` instead of editing generated outputs by hand.
 - Prefer updating project dependency state through `cpkg init`, `cpkg add`, `cpkg remove`, and `cpkg sync` instead of editing generated integration files by hand.
+- Keep `skills/cpkg` aligned with the current CLI help text and workflow semantics whenever user-visible command behavior changes.
+- In `skills/cpkg`, do not imply that every STM32CubeMX repository is `cpkg`-managed. Treat `wtrproject.toml` as the managed-project marker unless the user explicitly asks to initialize a new `wtrproject`.
+- In `skills/cpkg`, document that `cpkg init` transfers ownership of `./Modules` to `cpkg`, and users should integrate by including generated CMake and linking targets rather than wiring modules manually.
+- Validate changes to distributed skills with `quick_validate.py` before review.
 - If the user's requirements change and the new requirement should be captured in `AGENTS.md`, update `AGENTS.md` immediately before continuing the implementation.
