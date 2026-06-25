@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 
-use super::{CURRENT_FORMAT_VERSION, Cpkg, default_package_version};
+use super::{CURRENT_FORMAT_VERSION, CompileConfig, Cpkg, default_package_version};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Format {
@@ -32,6 +32,10 @@ struct CurrentCpkg {
     version: String,
     #[serde(default)]
     dependencies: Vec<String>,
+    #[serde(default)]
+    compile: CompileConfig,
+    #[serde(default)]
+    ignore: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -61,6 +65,8 @@ impl From<CurrentCpkg> for Cpkg {
             pkgname: current.pkgname,
             version: current.version,
             dependencies: current.dependencies,
+            compile: current.compile,
+            ignore: current.ignore,
         }
     }
 }
@@ -84,6 +90,8 @@ impl MigrationStep for LegacyPackageVersionMigration {
             pkgname: legacy.pkgname,
             version: legacy.version.unwrap_or_else(default_package_version),
             dependencies: legacy.dependencies.unwrap_or_default(),
+            compile: CompileConfig::default(),
+            ignore: Vec::new(),
         };
         toml::to_string(&cpkg).map_err(Into::into)
     }
@@ -110,6 +118,8 @@ impl MigrationStep for LegacyNamespaceMigration {
             pkgname: format!("{}::{}", legacy.namespace, legacy.name),
             version: default_package_version(),
             dependencies: legacy.deps.unwrap_or_default(),
+            compile: CompileConfig::default(),
+            ignore: Vec::new(),
         };
         toml::to_string(&cpkg).map_err(Into::into)
     }
@@ -238,5 +248,27 @@ deps = ["stm32cubemx"]
         assert_eq!(cpkg.pkgname, "bsp::CANDriver");
         assert_eq!(cpkg.version, "0.1.0");
         assert_eq!(cpkg.dependencies, vec!["stm32cubemx"]);
+    }
+
+    #[test]
+    fn load_or_migrate_preserves_compile_config_for_current_format() {
+        let (cpkg, migrated) = load_or_migrate(
+            r#"
+format_version = 1
+name = "DJI"
+pkgname = "MotorDrivers::DJI"
+version = "0.1.0"
+dependencies = ["bsp::CANDriver"]
+
+[compile]
+options = ["-Ofast"]
+defines = ["ARM_MATH_CM4"]
+"#,
+        )
+        .unwrap();
+
+        assert!(!migrated);
+        assert_eq!(cpkg.compile.options, vec!["-Ofast"]);
+        assert_eq!(cpkg.compile.defines, vec!["ARM_MATH_CM4"]);
     }
 }

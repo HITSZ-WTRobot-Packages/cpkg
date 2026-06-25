@@ -20,6 +20,8 @@ fn default_package_manifest(pkgname: &str, dependencies: Vec<String>) -> Cpkg {
         pkgname: pkgname.to_string(),
         version: manifest::default_package_version(),
         dependencies,
+        compile: manifest::CompileConfig::default(),
+        ignore: Vec::new(),
     }
 }
 
@@ -59,7 +61,7 @@ pub fn init(root: &Path, pkgname: &str, force: bool, deps: &[String]) -> Result<
     manifest::save(&cpkg_path, &cpkg)?;
     info!("cpkg.toml generated/migrated for {}", cpkg.pkgname);
 
-    let scanner = DefaultFsScanner;
+    let scanner = DefaultFsScanner::new(cpkg.ignore.clone());
     let generator = CMakeGenerator::default();
     generator
         .write_to(&cpkg, &scanner, &cmake_path)
@@ -74,7 +76,7 @@ pub fn generate(root: &Path) -> Result<()> {
     }
 
     let cpkg = manifest::load_or_migrate_default(&cpkg_path)?;
-    let scanner = DefaultFsScanner;
+    let scanner = DefaultFsScanner::new(cpkg.ignore.clone());
     let generator = CMakeGenerator::default();
     generator
         .write_to(&cpkg, &scanner, &root.join("CMakeLists.txt"))

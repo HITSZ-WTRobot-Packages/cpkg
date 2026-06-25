@@ -70,6 +70,40 @@ impl Generator for CMakeGenerator {
             let static_name = CMakeGenerator::pascal_case(&format!("{}_{}", namespace, name));
             let src_list = sources.join("\n    ");
 
+            let compile_options = if cpkg.compile.options.is_empty() {
+                String::new()
+            } else {
+                let opts = cpkg
+                    .compile
+                    .options
+                    .iter()
+                    .map(|o| format!("    {}", o))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "target_compile_options({static_name} PRIVATE\n{opts}\n)\n\n",
+                    static_name = static_name,
+                    opts = opts,
+                )
+            };
+
+            let compile_defines = if cpkg.compile.defines.is_empty() {
+                String::new()
+            } else {
+                let defs = cpkg
+                    .compile
+                    .defines
+                    .iter()
+                    .map(|d| format!("    {}", d))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "target_compile_definitions({static_name} PUBLIC\n{defs}\n)\n\n",
+                    static_name = static_name,
+                    defs = defs,
+                )
+            };
+
             let dep_links = if cpkg.dependencies.is_empty() {
                 String::new()
             } else {
@@ -96,7 +130,7 @@ target_include_directories({static_name}
 {include_dirs_text}
 )
 
-# link dependencies if any
+{compile_options}{compile_defines}# link dependencies if any
 {dep_links}
 
 # alias for external use
@@ -106,10 +140,46 @@ add_library({alias_name} ALIAS {static_name})
                 alias_name = alias_name,
                 src_list = src_list,
                 dep_links = dep_links,
-                include_dirs_text = include_dirs_text
+                include_dirs_text = include_dirs_text,
+                compile_options = compile_options,
+                compile_defines = compile_defines,
             )
         } else {
             let interface_name = format!("__{}_{}", namespace, name);
+
+            let compile_options = if cpkg.compile.options.is_empty() {
+                String::new()
+            } else {
+                let opts = cpkg
+                    .compile
+                    .options
+                    .iter()
+                    .map(|o| format!("    {}", o))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "target_compile_options({interface_name} INTERFACE\n{opts}\n)\n\n",
+                    interface_name = interface_name,
+                    opts = opts,
+                )
+            };
+
+            let compile_defines = if cpkg.compile.defines.is_empty() {
+                String::new()
+            } else {
+                let defs = cpkg
+                    .compile
+                    .defines
+                    .iter()
+                    .map(|d| format!("    {}", d))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "target_compile_definitions({interface_name} INTERFACE\n{defs}\n)\n\n",
+                    interface_name = interface_name,
+                    defs = defs,
+                )
+            };
 
             let dep_links = if cpkg.dependencies.is_empty() {
                 String::new()
@@ -134,7 +204,7 @@ target_include_directories({interface_name} INTERFACE
 {include_dirs_text}
 )
 
-# link dependencies if any
+{compile_options}{compile_defines}# link dependencies if any
 {dep_links}
 
 # alias for external use
@@ -143,8 +213,151 @@ add_library({alias_name} ALIAS {interface_name})
                 interface_name = interface_name,
                 alias_name = alias_name,
                 dep_links = dep_links,
-                include_dirs_text = include_dirs_text
+                include_dirs_text = include_dirs_text,
+                compile_options = compile_options,
+                compile_defines = compile_defines,
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::manifest::CompileConfig;
+    use std::path::Path;
+
+    struct MockScanner {
+        sources: Vec<String>,
+        include_dirs: Vec<String>,
+    }
+
+    impl Scanner for MockScanner {
+        fn scan_sources(&self, _dir: &Path) -> Vec<String> {
+            self.sources.clone()
+        }
+        fn scan_include_dirs(&self, _dir: &Path) -> Vec<String> {
+            self.include_dirs.clone()
+        }
+    }
+
+    fn base_cpkg() -> Cpkg {
+        Cpkg {
+            format_version: 1,
+            name: "test".to_string(),
+            pkgname: "Test::Lib".to_string(),
+            version: "0.1.0".to_string(),
+            dependencies: vec![],
+            compile: CompileConfig::default(),
+            ignore: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn static_lib_with_compile_options_uses_private_scope() {
+        let mut cpkg = base_cpkg();
+        cpkg.compile = CompileConfig {
+            options: vec!["-Ofast".to_string()],
+            defines: vec![],
+        };
+
+        let scanner = MockScanner {
+            sources: vec!["\"src/main.c\"".to_string()],
+            include_dirs: vec![".".to_string()],
+        };
+
+        let cmake = CMakeGenerator::default();
+        let output = cmake.generate_string(&cpkg, &scanner);
+
+        assert!(output.contains("target_compile_options(TestLib PRIVATE"));
+        assert!(output.contains("-Ofast"));
+        assert!(!output.contains("target_compile_definitions"));
+    }
+
+    #[test]
+    fn static_lib_with_defines_uses_public_scope() {
+        let mut cpkg = base_cpkg();
+        cpkg.compile = CompileConfig {
+            options: vec![],
+            defines: vec!["ARM_MATH_CM4".to_string()],
+        };
+
+        let scanner = MockScanner {
+            sources: vec!["\"src/main.c\"".to_string()],
+            include_dirs: vec![".".to_string()],
+        };
+
+        let cmake = CMakeGenerator::default();
+        let output = cmake.generate_string(&cpkg, &scanner);
+
+        assert!(output.contains("target_compile_definitions(TestLib PUBLIC"));
+        assert!(output.contains("ARM_MATH_CM4"));
+        assert!(!output.contains("target_compile_options"));
+    }
+
+    #[test]
+    fn interface_lib_with_compile_config_uses_interface_scope() {
+        let mut cpkg = base_cpkg();
+        cpkg.compile = CompileConfig {
+            options: vec!["-Wall".to_string()],
+            defines: vec!["USE_DSP".to_string()],
+        };
+
+        let scanner = MockScanner {
+            sources: vec![],
+            include_dirs: vec![".".to_string()],
+        };
+
+        let cmake = CMakeGenerator::default();
+        let output = cmake.generate_string(&cpkg, &scanner);
+
+        assert!(output.contains("target_compile_options(__Test_Lib INTERFACE"));
+        assert!(output.contains("-Wall"));
+        assert!(output.contains("target_compile_definitions(__Test_Lib INTERFACE"));
+        assert!(output.contains("USE_DSP"));
+    }
+
+    #[test]
+    fn empty_compile_config_produces_no_extra_cmake_commands() {
+        let cpkg = base_cpkg();
+
+        let scanner = MockScanner {
+            sources: vec!["\"src/main.c\"".to_string()],
+            include_dirs: vec![".".to_string()],
+        };
+
+        let cmake = CMakeGenerator::default();
+        let output = cmake.generate_string(&cpkg, &scanner);
+
+        assert!(!output.contains("target_compile_options"));
+        assert!(!output.contains("target_compile_definitions"));
+    }
+
+    #[test]
+    fn generator_output_is_stable_for_legacy_cpkg() {
+        let cpkg = Cpkg {
+            format_version: 1,
+            name: "DJI".to_string(),
+            pkgname: "MotorDrivers::DJI".to_string(),
+            version: "0.1.0".to_string(),
+            dependencies: vec!["bsp::CANDriver".to_string()],
+            compile: CompileConfig::default(),
+            ignore: Vec::new(),
+        };
+
+        let scanner = MockScanner {
+            sources: vec!["\"src/dji.c\"".to_string()],
+            include_dirs: vec![".".to_string(), "include".to_string()],
+        };
+
+        let cmake = CMakeGenerator::default();
+        let output = cmake.generate_string(&cpkg, &scanner);
+
+        assert!(output.contains("add_library(MotorDriversDJI STATIC"));
+        assert!(output.contains("target_include_directories(MotorDriversDJI"));
+        assert!(
+            output.contains("target_link_libraries(MotorDriversDJI PUBLIC bsp::CANDriver)")
+        );
+        assert!(output.contains("add_library(MotorDrivers::DJI ALIAS MotorDriversDJI)"));
     }
 }
