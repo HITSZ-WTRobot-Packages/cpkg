@@ -5,7 +5,8 @@ pub mod scanner;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
-use tracing::info;
+use std::process::Command;
+use tracing::{info, warn};
 
 pub use self::generator::{CMakeGenerator, Generator};
 pub use self::manifest::Cpkg;
@@ -61,32 +62,68 @@ pub fn init(root: &Path, pkgname: &str, force: bool, deps: &[String]) -> Result<
     manifest::save(&cpkg_path, &cpkg)?;
     info!("cpkg.toml generated/migrated for {}", cpkg.pkgname);
 
-    let scanner = DefaultFsScanner::new(cpkg.ignore.clone());
-    let generator = CMakeGenerator::default();
-    generator
-        .write_to(&cpkg, &scanner, &cmake_path)
-        .context("failed to write CMakeLists.txt")?;
+    regenerate_from_manifest(root)?;
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationOutcome {
+    Written,
+    UpToDate,
+}
+
+/// Regenerate `<package_dir>/CMakeLists.txt` from `<package_dir>/cpkg.toml`.
+pub fn regenerate_from_manifest(package_dir: &Path) -> Result<GenerationOutcome> {
+    let manifest_path = package_dir.join("cpkg.toml");
+    let cpkg = manifest::load_for_generation(&manifest_path)
+        .with_context(|| format!("failed to load '{}'", manifest_path.display()))?;
+    let scanner = DefaultFsScanner::new(cpkg.ignore.clone());
+    let generator = CMakeGenerator::default();
+    let content = generator.generate_string(&cpkg, &scanner, package_dir);
+    let target = package_dir.join("CMakeLists.txt");
+
+    if fs::read_to_string(&target).is_ok_and(|existing| existing == content) {
+        return Ok(GenerationOutcome::UpToDate);
+    }
+
+    fs::write(&target, &content)
+        .with_context(|| format!("failed to write '{}'", target.display()))?;
+    if is_tracked_by_git(&target) {
+        warn!(
+            "generated '{}' is still tracked by git; add it to .gitignore",
+            target.display()
+        );
+    }
+    Ok(GenerationOutcome::Written)
+}
+
+/// `true` when `<dir>/CMakeLists.txt` is tracked by git. Not a git repository / any git
+/// failure counts as untracked so package authoring never fails on git state.
+fn is_tracked_by_git(target: &Path) -> bool {
+    let Some(dir) = target.parent() else {
+        return false;
+    };
+    Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["ls-files", "--error-unmatch", "CMakeLists.txt"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 pub fn generate(root: &Path) -> Result<()> {
-    let cpkg_path = root.join("cpkg.toml");
-    if !cpkg_path.exists() {
+    if !root.join("cpkg.toml").exists() {
         anyhow::bail!("cpkg.toml not found");
     }
 
-    let cpkg = manifest::load_or_migrate_default(&cpkg_path)?;
-    let scanner = DefaultFsScanner::new(cpkg.ignore.clone());
-    let generator = CMakeGenerator::default();
-    generator
-        .write_to(&cpkg, &scanner, &root.join("CMakeLists.txt"))
-        .context("failed to write CMakeLists.txt")?;
+    regenerate_from_manifest(root)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::create;
+    use super::{GenerationOutcome, create, regenerate_from_manifest};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -112,6 +149,42 @@ mod tests {
 
         let manifest = fs::read_to_string(dir.join("MotorDrivers::DJI").join("cpkg.toml")).unwrap();
         assert!(manifest.contains("version = \"0.1.0\""));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn regenerate_from_manifest_writes_then_reports_up_to_date() {
+        let dir = make_temp_dir("package-regenerate");
+        fs::write(
+            dir.join("cpkg.toml"),
+            "name = \"Core\"\npkgname = \"SharedRepo::Core\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(dir.join("core.c"), b"").unwrap();
+
+        assert_eq!(
+            regenerate_from_manifest(&dir).unwrap(),
+            GenerationOutcome::Written
+        );
+        let generated = fs::read_to_string(dir.join("CMakeLists.txt")).unwrap();
+        assert!(generated.contains("add_library(SharedRepoCore STATIC"));
+        assert!(generated.contains("\"./core.c\""));
+        assert!(generated.contains("add_library(SharedRepo::Core ALIAS SharedRepoCore)"));
+        assert!(!generated.contains(&dir.to_string_lossy().to_string()));
+
+        assert_eq!(
+            regenerate_from_manifest(&dir).unwrap(),
+            GenerationOutcome::UpToDate
+        );
+
+        fs::write(dir.join("extra.c"), b"").unwrap();
+        assert_eq!(
+            regenerate_from_manifest(&dir).unwrap(),
+            GenerationOutcome::Written
+        );
+        let regenerated = fs::read_to_string(dir.join("CMakeLists.txt")).unwrap();
+        assert!(regenerated.contains("\"./extra.c\""));
 
         let _ = fs::remove_dir_all(dir);
     }

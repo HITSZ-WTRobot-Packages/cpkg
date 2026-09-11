@@ -61,6 +61,7 @@ Effects:
 - Resolve direct and transitive dependencies.
 - Synchronize the required repositories under `Modules/` unless the run is offline or blocked by network limits.
 - Regenerate `cmake/wtr_modules.cmake`.
+- Regenerate `CMakeLists.txt` for every resolved package from its `cpkg.toml`. That file is derived output; driver repositories exclude it through `.gitignore` and must not commit it.
 
 Offline rule:
 - `cpkg add --offline` may still record the dependency in `wtrproject.toml`.
@@ -76,6 +77,7 @@ cpkg remove MotorDrivers::DJI bsp::CANDriver
 Effects:
 - Update `wtrproject.toml`.
 - Regenerate `cmake/wtr_modules.cmake` locally.
+- Regenerate `CMakeLists.txt` for every remaining resolved package from its `cpkg.toml`.
 - Remove managed submodule repositories that are no longer required.
 - Do not fetch or resync retained repositories.
 
@@ -92,6 +94,7 @@ Effects:
 - Re-resolve the active dependency graph.
 - Synchronize required repositories under `Modules/`.
 - Regenerate `cmake/wtr_modules.cmake`.
+- Regenerate `CMakeLists.txt` for every resolved package from its `cpkg.toml`; packages without a `cpkg.toml` are warned about and skipped.
 
 ## CMake Integration
 

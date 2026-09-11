@@ -4,7 +4,7 @@
 
 它解决两类问题：
 
-- **项目侧依赖管理**：在 STM32CubeMX 工程根目录维护 `wtrproject.toml`，解析包索引，拉取 `Modules/` 下的 Git submodule，并生成 `cmake/wtr_modules.cmake`
+- **项目侧依赖管理**：在 STM32CubeMX 工程根目录维护 `wtrproject.toml`，解析包索引，拉取 `Modules/` 下的 Git submodule，生成 `cmake/wtr_modules.cmake`，并按每个包的 `cpkg.toml` 自动再生其派生的 `CMakeLists.txt`
 - **包侧元数据生成**：在驱动包目录维护 `cpkg.toml`，扫描源码/头文件并生成对应的 `CMakeLists.txt`
 
 ## 功能概览
@@ -13,10 +13,11 @@
 - 从包索引解析包所属仓库与依赖关系
 - 将驱动仓库同步到 `Modules/` Git submodule
 - 生成 `cmake/wtr_modules.cmake` 供主工程引入
+- 同步时为每个受管包按其 `cpkg.toml` 再生派生的 `CMakeLists.txt`
 - 支持全局配置多个索引镜像源与命名 org 镜像源
 - 交互式编辑项目直接依赖
 - 为驱动包生成或迁移 `cpkg.toml`
-- 为驱动包自动生成 `CMakeLists.txt`
+- 为驱动包自动生成 `CMakeLists.txt`（派生产物，不提交）
 
 ## 安装
 
@@ -79,6 +80,7 @@ cargo build --release
 - 在驱动包目录运行
 - 包目录通常包含 `include/`、`src/`、`cpkg.toml`
 - `cpkg package generate` 会扫描当前目录下的 `.c/.cpp/.h/.hpp` 文件来生成 `CMakeLists.txt`
+- 包目录的 `CMakeLists.txt` 是派生产物：项目侧 `cpkg sync` 会依据 `cpkg.toml` 自动再生它，驱动仓库应当用 `.gitignore` 排除、不要提交
 
 ## 两种工作流
 
@@ -170,6 +172,7 @@ cpkg add -I
 - `cpkg add` 会更新 `wtrproject.toml`
 - 如果有新增依赖，会同步 `Modules/` 下所需仓库
 - 会生成或更新 `cmake/wtr_modules.cmake`
+- 会为每个已解析的包按其 `cpkg.toml` 再生 `CMakeLists.txt`（派生文件，不提交）
 - `--submodule-protocol` 支持 `ssh` 和 `https`
 - 如果项目未显式设置 `[org].name`，则会优先使用全局 `config.toml` 中的 `default_org`
 - 如果不显式传入 `--submodule-protocol`，则优先使用项目 `[org]` 的 `protocol`，再回退到命名全局 org 源的 `default_protocol`，最后回退到内置默认 `ssh`
@@ -184,6 +187,7 @@ cpkg remove MotorDrivers::DJI
 
 - `cpkg remove` 会更新 `wtrproject.toml`
 - 会本地刷新 `cmake/wtr_modules.cmake`
+- 会为仍被依赖的包按其 `cpkg.toml` 再生 `CMakeLists.txt`
 - 会删除不再需要的受管仓库
 - 不会重新同步保留中的 submodule
 
@@ -205,6 +209,7 @@ cpkg sync --submodule-protocol https
 - 会解析直接依赖与传递依赖
 - 会同步 `Modules/` 中需要的仓库
 - 会生成 `cmake/wtr_modules.cmake`
+- 会为每个已解析的包按其 `cpkg.toml` 再生 `CMakeLists.txt`；缺少 `cpkg.toml` 的包会打印警告并跳过
 
 ## `wtrproject.toml` 示例
 
@@ -289,6 +294,8 @@ wtr_link_packages_public(${PROJECT_NAME})
 
 生成的 `cmake/wtr_modules.cmake` 只会对当前依赖链上的包目录调用 `add_subdirectory(...)`，不会把同一仓库里未被依赖的其他包一起编译。
 
+同一次 `cpkg sync` 也会为这些依赖链上的包目录依据各自的 `cpkg.toml` 生成 `CMakeLists.txt`，因此克隆仓库后直接执行 `cpkg sync` 再构建即可，不需要手工进入 `Modules/` 逐包生成。
+
 ## 快速开始：包作者工作流
 
 ### 1. 创建新包目录
@@ -321,11 +328,20 @@ cpkg package init MotorDrivers::DJI --deps bsp::CANDriver
 
 ### 3. 重新生成 `CMakeLists.txt`
 
+在驱动包目录中执行：
+
 ```bash
+cd MotorDrivers/motors/DJI
 cpkg package generate
 ```
 
-这个命令会读取本地 `cpkg.toml`，扫描当前目录并生成 `CMakeLists.txt`。
+这个命令会读取当前目录的 `cpkg.toml`，扫描当前目录并生成 `CMakeLists.txt`。
+
+### 4. `CMakeLists.txt` 是派生产物
+
+- 包目录里的 `CMakeLists.txt` 完全由 `cpkg.toml` 派生：驱动仓库应当用 `.gitignore` 排除它，不要提交。
+- 固件工程侧不需要手工执行 `cpkg package generate`：`cpkg sync`（以及 `cpkg add`、`cpkg remove`）会为每个已解析的包（含传递依赖）自动再生 `CMakeLists.txt`。
+- 如果生成的 `CMakeLists.txt` 仍被 git 跟踪，`cpkg` 会打印警告提示把它加入 `.gitignore`；`cpkg` 不会修改任何 `.gitignore`，也不会执行 `git rm --cached`。
 
 ## `cpkg.toml` 示例
 
@@ -489,6 +505,10 @@ cpkg init --ioc YourProject.ioc
 ### 为什么 `cpkg add` / `cpkg sync` 会涉及 Git submodule？
 
 因为 `cpkg` 会把驱动仓库放到 `Modules/` 下，并用 Git submodule 管理这些受管仓库。
+
+### 为什么 `Modules/` 里的包目录没有 `CMakeLists.txt`？
+
+因为包目录的 `CMakeLists.txt` 是 `cpkg.toml` 的派生产物，不随驱动仓库提交。在固件工程根目录执行一次 `cpkg sync` 即可为依赖链上的每个包重新生成；如果只想单独重建某个包，可以进入该包目录执行 `cpkg package generate`。
 
 ### 为什么推荐在 Windows Terminal / PowerShell 中使用？
 

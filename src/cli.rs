@@ -23,8 +23,9 @@ use cpkg::{
 The project-side workflow uses `wtrproject.toml` to track direct dependencies, \
 downloads a package index, resolves transitive dependencies, and synchronizes \
 driver repositories into `Modules/` as Git submodules.\n\n\
-Package-authoring commands stay under `cpkg package ...` and continue to manage \
-individual driver-package metadata with `cpkg.toml`.\n\n\
+Package-authoring commands stay under `cpkg package ...` and manage individual \
+driver-package metadata with `cpkg.toml`; each package's generated `CMakeLists.txt` \
+is derived output that project-side `cpkg sync` regenerates automatically.\n\n\
 Use `-v` or `--verbose` to enable debug logging.",
     after_help = "Examples:\n  \
 cpkg init --ioc MyBoard.ioc\n  \
@@ -63,7 +64,7 @@ enum Commands {
     Add(AddArgs),
     /// Remove direct package dependencies and refresh local project links.
     Remove(RemoveArgs),
-    /// Synchronize submodules and regenerate project integration files.
+    /// Synchronize submodules, regenerate package CMake files, and refresh project links.
     Sync(SyncArgs),
     /// Show or update global mirror configuration under `~/.cpkg/config.toml`.
     Config {
@@ -112,7 +113,9 @@ cpkg add --offline MotorDrivers::DJI\n  \
 cpkg add -I --submodule-protocol https\n  \
 cpkg add -I MotorDrivers::DJI\n\n\
 If `cpkg add --offline` records a dependency that cannot be applied without fetching a new \
-repository, it still updates `wtrproject.toml`; run `cpkg sync` online later to apply it."
+repository, it still updates `wtrproject.toml`; run `cpkg sync` online later to apply it.\n\n\
+This command also regenerates `CMakeLists.txt` for every resolved driver package from its \
+`cpkg.toml`; that file is derived output and should not be committed."
 )]
 struct AddArgs {
     /// Edit direct dependencies in an interactive tree picker.
@@ -131,8 +134,8 @@ struct AddArgs {
     after_help = "Examples:\n  \
 cpkg remove MotorDrivers::DJI\n  \
 cpkg remove MotorDrivers::DJI bsp::CANDriver\n\n\
-This command updates `wtrproject.toml` and regenerates `cmake/wtr_modules.cmake` locally \
-without synchronizing `Modules/` submodules."
+This command updates `wtrproject.toml` and regenerates `cmake/wtr_modules.cmake` and package \
+`CMakeLists.txt` files locally without synchronizing `Modules/` submodules."
 )]
 struct RemoveArgs {
     /// Direct package names to remove from `wtrproject.toml`.
@@ -142,13 +145,15 @@ struct RemoveArgs {
 
 #[derive(Args)]
 #[command(
-    about = "Synchronize `Modules/` submodules and regenerate CMake integration",
+    about = "Synchronize `Modules/` submodules, regenerate package CMake files, and refresh CMake integration",
     after_help = "Examples:\n  \
 cpkg sync\n  \
 cpkg sync --submodule-protocol https\n  \
 cpkg sync --offline\n\n\
 This command generates `cmake/wtr_modules.cmake`; include it from the root `CMakeLists.txt` \
-and call `wtr_link_packages(<target>)` or `wtr_link_packages_public(<target>)`."
+and call `wtr_link_packages(<target>)` or `wtr_link_packages_public(<target>)`.\n\n\
+It also regenerates `CMakeLists.txt` for every resolved driver package from its `cpkg.toml`; \
+that file is derived output and should not be committed."
 )]
 struct SyncArgs {
     #[command(flatten)]
@@ -368,7 +373,7 @@ enum PackageCommands {
         #[arg(short, long)]
         deps: Vec<String>,
     },
-    /// Regenerate `CMakeLists.txt` from the local `cpkg.toml`.
+    /// Regenerate `CMakeLists.txt` for the package in the current directory from `cpkg.toml`.
     Generate,
     /// Scaffold a new driver-package directory with `include/` and `src/`.
     Create {

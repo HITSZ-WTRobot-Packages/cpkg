@@ -20,6 +20,7 @@ These rules describe the projects that `cpkg` manages under `/home/syhanjin/work
 - Main projects consume driver libraries by first adding the driver repository with `add_subdirectory(...)`, which makes all packages from that repository available.
 - After adding a driver repository with `add_subdirectory(...)`, link only the required driver targets into the firmware target.
 - Driver target names should match the names declared in the corresponding `cpkg.toml` files.
+- A package-level `CMakeLists.txt` is derived output of its `cpkg.toml`: project-side `cpkg sync` (also reached through `cpkg add` and `cpkg remove`) regenerates it for every resolved package, driver repositories exclude it through `.gitignore`, and it must not be committed.
 - Use `/home/syhanjin/workspace/robocon2026/references/Packages/cpkg_index.json` as the generated driver-package index.
 - Prefer editing the project `.ioc` file and regenerating CubeMX output instead of hand-editing generated HAL code.
 - Do not inspect `Core/`, `Drivers/`, or `Middlewares/` unless the user explicitly asks; they are treated as STM32CubeMX-generated code.
@@ -27,7 +28,9 @@ These rules describe the projects that `cpkg` manages under `/home/syhanjin/work
 ### Driver Package Metadata Management
 - Run `cpkg --help` for top-level usage and `cpkg <COMMAND> --help` before using an unfamiliar subcommand.
 - Use `cpkg package init`, `cpkg package generate`, and `cpkg package create` for package-authoring workflows in this repository.
-- When adding or renaming driver source files, update the nearest `CMakeLists.txt` and `cpkg.toml` if the package surface changes, then regenerate the package index.
+- When adding or renaming driver source files, update `cpkg.toml` if the package surface changes, regenerate the package `CMakeLists.txt` (`cpkg package generate` in the package directory, or project-side `cpkg sync`), then regenerate the package index.
+- Never hand-edit or commit a package `CMakeLists.txt`: it is regenerated from `cpkg.toml`, and the driver repository should list it in `.gitignore`.
+- When a generated package `CMakeLists.txt` is still tracked by git, `cpkg` warns instead of failing; do not make cpkg edit `.gitignore` or run `git rm --cached`.
 - Do not manually edit generated package index files when `cpkg` can regenerate them.
 
 ## Product Responsibilities
@@ -59,13 +62,15 @@ When changing CLI behavior, update the help text in `src/main.rs` and verify the
 - `resolver.rs` computes direct and transitive package and repository requirements.
 - `submodule.rs` synchronizes `Modules/` Git submodules and forces them to track `main`.
 - `integration.rs` regenerates project integration output for the current dependency set.
+- `packages.rs` regenerates each resolved package's derived `CMakeLists.txt` from its `cpkg.toml`, warning and skipping packages that have no `cpkg.toml`.
 - `interactive.rs` contains interactive dependency-selection flows shared by `init` and `add`.
 
 `src/package/` owns driver-package authoring:
 - `manifest/mod.rs` parses and saves canonical `cpkg.toml` manifests.
 - `manifest/migrations.rs` contains versioned migration steps; keep migration logic out of the main manifest module.
-- `scanner.rs` discovers package sources and headers.
-- `generator.rs` writes package `CMakeLists.txt`.
+- `scanner.rs` discovers package sources and headers; it emits paths relative to the scan root.
+- `generator.rs` writes package `CMakeLists.txt`; `Generator::generate_string` takes the package root explicitly and must not depend on the process working directory.
+- `mod.rs` exposes `regenerate_from_manifest` as the single entry point that loads `cpkg.toml`, scans, writes `CMakeLists.txt` only when content changed, and warns when the file is still git-tracked.
 
 ## Behavior Requirements
 
@@ -86,16 +91,20 @@ When changing CLI behavior, update the help text in `src/main.rs` and verify the
 - `cpkg add --offline` and `cpkg sync --offline` should resolve dependencies from the project-local or cached package index without refreshing the remote index.
 - In offline mode, existing submodules should use locally cached repository state only; skip fetch and pull operations.
 - In offline mode, when a newly required repository is not yet registered as a submodule, attempt to register it without fetching repository data; if the installed Git does not support that workflow, report that `--offline` cannot be used for that repository yet.
+- Project-side sync must regenerate every resolved package's `CMakeLists.txt` after submodule synchronization and before writing `cmake/wtr_modules.cmake`, so a failed generation leaves the integration file untouched.
+- Package `CMakeLists.txt` generation failure (unreadable or invalid `cpkg.toml`) aborts project-side sync with a package-identifying error; a missing `cpkg.toml` is only a warning and the package is skipped.
 
 ### Removal Semantics
 - When `cpkg add -I` only removes packages and adds no new direct dependency, it should:
   - update `wtrproject.toml`
   - regenerate project links locally
+  - regenerate `CMakeLists.txt` for the retained packages from their `cpkg.toml`
   - remove any managed submodule repositories that are no longer required
   - avoid fetching or syncing retained submodules
 - `cpkg remove` should:
   - update `wtrproject.toml`
   - locally regenerate the project integration file
+  - regenerate `CMakeLists.txt` for the retained packages from their `cpkg.toml`
   - remove any managed submodule repositories that are no longer required
   - avoid fetching or synchronizing retained submodules
 
@@ -170,6 +179,7 @@ When a change needs to fetch a new crate, refresh `Cargo.lock`, or otherwise upd
 ### Testing
 - Place unit tests next to the code they validate using `#[cfg(test)] mod tests`.
 - Cover `wtrproject.toml` behavior, package-index loading, dependency resolution, submodule and integration generation logic, and `cpkg.toml` migrations.
+- Cover package `CMakeLists.txt` generation from an explicit package root: assert emitted source paths are relative to that root and that unchanged content is not rewritten.
 - Add focused regression tests for CLI parsing changes when behavior is non-trivial.
 - Run the most targeted checks first, then broader validation such as `cargo test --offline`.
 - If dependency changes require network access or a lockfile refresh, use the smallest non-offline Cargo command that unblocks verification, then resume targeted checks.

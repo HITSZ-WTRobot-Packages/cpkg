@@ -13,6 +13,7 @@ use super::updates::{
 use super::{
     index, integration, interactive,
     manifest::{self, ProjectInitOptions, WtrProject, load, save, validate_stm32_project},
+    packages,
     resolver::{self, ResolvedProject, SubmoduleProtocol},
     submodule,
 };
@@ -157,6 +158,13 @@ fn finish_sync(
     let previous_repositories = integration::read_managed_repositories(root)?;
     validate_stm32_project(root, manifest)?;
     submodule::sync_repositories_with_options(root, &resolved.repositories, options.offline)?;
+    let generation = packages::regenerate_package_cmake_files(root, &resolved.managed_packages)?;
+    debug!(
+        written = generation.written,
+        up_to_date = generation.up_to_date,
+        skipped = generation.skipped,
+        "regenerated package CMakeLists.txt files"
+    );
     let integration_file = integration::write_integration_file(root, resolved)?;
     submodule::remove_unused_repositories(root, &previous_repositories, &resolved.repositories)?;
 
@@ -187,6 +195,7 @@ fn refresh_project_links(
     );
     let previous_repositories = integration::read_managed_repositories(root)?;
     let resolved = resolved_project_for_integration(root, manifest, options)?;
+    packages::regenerate_package_cmake_files(root, &resolved.managed_packages)?;
     let path = integration::write_integration_file(root, &resolved)?;
     submodule::remove_unused_repositories(root, &previous_repositories, &resolved.repositories)?;
     Ok(path)
@@ -630,6 +639,58 @@ mod tests {
         assert!(!integration.contains("Modules/SharedRepo/feature_b"));
         assert!(integration.contains("\"${CMAKE_CURRENT_LIST_DIR}/../${_wtr_package_dir}\""));
         assert!(!integration.contains("\"${CMAKE_CURRENT_LIST_DIR}/../Modules/${_wtr_repo}\""));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn refresh_project_links_generates_package_cmake_files() {
+        let dir = make_temp_dir("refresh-package-cmake");
+        fs::write(dir.join("robot.ioc"), "").unwrap();
+        fs::write(
+            dir.join("cpkg_index.json"),
+            r#"{
+  "Motors":[
+    {
+      "path":"core",
+      "name":"Core",
+      "pkgname":"Motors::Core",
+      "version":"0.1.0",
+      "dependencies":[]
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        init(
+            &dir,
+            ProjectInitOptions {
+                force: false,
+                name: Some("robot".to_string()),
+                ioc: None,
+            },
+        )
+        .unwrap();
+
+        let mut manifest = load(&dir).unwrap();
+        manifest.dependencies.packages = vec!["Motors::Core".to_string()];
+        save(&dir, &manifest).unwrap();
+
+        let package_dir = dir.join("Modules").join("Motors").join("core");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(
+            package_dir.join("cpkg.toml"),
+            "name = \"Core\"\npkgname = \"Motors::Core\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(package_dir.join("core.c"), b"").unwrap();
+
+        refresh_project_links(&dir, &manifest, SyncOptions::default()).unwrap();
+
+        let generated = fs::read_to_string(package_dir.join("CMakeLists.txt")).unwrap();
+        assert!(generated.contains("add_library(MotorsCore STATIC"));
+        assert!(generated.contains("\"./core.c\""));
 
         let _ = fs::remove_dir_all(dir);
     }

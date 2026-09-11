@@ -1,17 +1,11 @@
-use std::fs;
 use std::path::Path;
 
 use super::manifest::Cpkg;
 use super::scanner::Scanner;
 
 pub trait Generator {
-    /// Generate content (as string) for given `Cpkg`, using provided `Scanner` to discover files.
-    fn generate_string(&self, cpkg: &Cpkg, scanner: &dyn Scanner) -> String;
-    /// Write the generated content to a target path (like CMakeLists.txt).
-    fn write_to(&self, cpkg: &Cpkg, scanner: &dyn Scanner, target: &Path) -> std::io::Result<()> {
-        let content = self.generate_string(cpkg, scanner);
-        fs::write(target, content)
-    }
+    /// Generate content (as string) for given `Cpkg`, scanning package files under `root`.
+    fn generate_string(&self, cpkg: &Cpkg, scanner: &dyn Scanner, root: &Path) -> String;
 }
 
 pub struct CMakeGenerator;
@@ -37,7 +31,7 @@ impl Default for CMakeGenerator {
 }
 
 impl Generator for CMakeGenerator {
-    fn generate_string(&self, cpkg: &Cpkg, scanner: &dyn Scanner) -> String {
+    fn generate_string(&self, cpkg: &Cpkg, scanner: &dyn Scanner, root: &Path) -> String {
         let parts: Vec<&str> = cpkg.pkgname.split("::").collect();
         let (namespace, name) = if parts.len() == 2 {
             (parts[0], parts[1])
@@ -46,10 +40,10 @@ impl Generator for CMakeGenerator {
         };
         let alias_name = cpkg.pkgname.clone();
 
-        let sources = scanner.scan_sources(Path::new("."));
+        let sources = scanner.scan_sources(root);
         let has_sources = !sources.is_empty();
 
-        let include_dirs = scanner.scan_include_dirs(Path::new("."));
+        let include_dirs = scanner.scan_include_dirs(root);
 
         let include_dirs_text = include_dirs
             .iter()
@@ -267,7 +261,7 @@ mod tests {
         };
 
         let cmake = CMakeGenerator::default();
-        let output = cmake.generate_string(&cpkg, &scanner);
+        let output = cmake.generate_string(&cpkg, &scanner, Path::new("."));
 
         assert!(output.contains("target_compile_options(TestLib PRIVATE"));
         assert!(output.contains("-Ofast"));
@@ -288,7 +282,7 @@ mod tests {
         };
 
         let cmake = CMakeGenerator::default();
-        let output = cmake.generate_string(&cpkg, &scanner);
+        let output = cmake.generate_string(&cpkg, &scanner, Path::new("."));
 
         assert!(output.contains("target_compile_definitions(TestLib PUBLIC"));
         assert!(output.contains("ARM_MATH_CM4"));
@@ -309,7 +303,7 @@ mod tests {
         };
 
         let cmake = CMakeGenerator::default();
-        let output = cmake.generate_string(&cpkg, &scanner);
+        let output = cmake.generate_string(&cpkg, &scanner, Path::new("."));
 
         assert!(output.contains("target_compile_options(__Test_Lib INTERFACE"));
         assert!(output.contains("-Wall"));
@@ -327,7 +321,7 @@ mod tests {
         };
 
         let cmake = CMakeGenerator::default();
-        let output = cmake.generate_string(&cpkg, &scanner);
+        let output = cmake.generate_string(&cpkg, &scanner, Path::new("."));
 
         assert!(!output.contains("target_compile_options"));
         assert!(!output.contains("target_compile_definitions"));
@@ -351,13 +345,11 @@ mod tests {
         };
 
         let cmake = CMakeGenerator::default();
-        let output = cmake.generate_string(&cpkg, &scanner);
+        let output = cmake.generate_string(&cpkg, &scanner, Path::new("."));
 
         assert!(output.contains("add_library(MotorDriversDJI STATIC"));
         assert!(output.contains("target_include_directories(MotorDriversDJI"));
-        assert!(
-            output.contains("target_link_libraries(MotorDriversDJI PUBLIC bsp::CANDriver)")
-        );
+        assert!(output.contains("target_link_libraries(MotorDriversDJI PUBLIC bsp::CANDriver)"));
         assert!(output.contains("add_library(MotorDrivers::DJI ALIAS MotorDriversDJI)"));
     }
 }

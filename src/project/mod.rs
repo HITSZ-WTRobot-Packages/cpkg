@@ -5,6 +5,7 @@ pub mod interactive;
 pub mod listing;
 pub mod manifest;
 pub mod network;
+mod packages;
 pub mod resolver;
 mod source;
 pub mod submodule;

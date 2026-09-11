@@ -63,16 +63,14 @@ impl DefaultFsScanner {
                     self.rec_sources(root, &path, files);
                 } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                     if ext == "c" || ext == "cpp" {
-                        if let Some(s) = normalize_path(&path) {
-                            if let Some(rel) =
-                                normalize_path(path.strip_prefix(root).unwrap_or(&path))
-                            {
-                                if self.is_ignored(&rel) {
-                                    continue;
-                                }
-                            }
-                            files.push(format!("\"{}\"", s));
+                        let Some(rel) = normalize_path(path.strip_prefix(root).unwrap_or(&path))
+                        else {
+                            continue;
+                        };
+                        if self.is_ignored(&rel) {
+                            continue;
                         }
+                        files.push(format!("\"./{rel}\""));
                     }
                 }
             }
@@ -98,8 +96,7 @@ impl DefaultFsScanner {
                     if ext == "h" || ext == "hpp" {
                         let parent = path.parent().unwrap_or(Path::new("."));
                         let rel_dir = parent.strip_prefix(root).unwrap_or(parent);
-                        let dir_str =
-                            normalize_path(rel_dir).unwrap_or_else(|| ".".to_string());
+                        let dir_str = normalize_path(rel_dir).unwrap_or_else(|| ".".to_string());
                         if self.is_ignored(&dir_str) {
                             continue;
                         }
@@ -187,6 +184,20 @@ mod tests {
 
         assert!(sources.iter().any(|s| s.contains("main.c")));
         assert!(sources.iter().any(|s| s.contains("build/gen.c")));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn absolute_root_yields_relative_source_paths() {
+        let dir = make_temp_dir("abs-root");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join("src").join("core.c"), b"").unwrap();
+
+        let scanner = DefaultFsScanner::new(vec![]);
+        let sources = scanner.scan_sources(&dir);
+
+        assert_eq!(sources, vec!["\"./src/core.c\"".to_string()]);
 
         let _ = fs::remove_dir_all(dir);
     }

@@ -92,9 +92,17 @@ pub fn load_or_migrate_default(path: &Path) -> Result<Cpkg> {
     Ok(cpkg)
 }
 
+/// Load a package manifest for build-file generation without writing migrations back.
+pub fn load_for_generation(path: &Path) -> Result<Cpkg> {
+    let content = fs::read_to_string(path).context("failed to read cpkg.toml")?;
+    let (mut cpkg, _) = migrations::load_or_migrate(&content)?;
+    normalize_manifest(&mut cpkg);
+    Ok(cpkg)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Cpkg, CompileConfig, CURRENT_FORMAT_VERSION, load_or_migrate_default};
+    use super::{CURRENT_FORMAT_VERSION, CompileConfig, Cpkg, load_or_migrate_default};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
