@@ -8,6 +8,7 @@ use self::format::{error_summary, format_command};
 use self::panel::{join_reader, read_stream};
 
 pub(crate) use self::panel::NetworkBatchLogger;
+pub use self::panel::PanelAwareWriter;
 
 pub struct LoggedCommandOutput {
     pub stdout: String,

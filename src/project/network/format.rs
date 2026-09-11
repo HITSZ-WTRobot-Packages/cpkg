@@ -1,26 +1,42 @@
-use console::style;
+use console::{measure_text_width, strip_ansi_codes, style, truncate_str};
 use std::ffi::OsStr;
 use std::process::{Command, ExitStatus};
 
 use super::ConcurrentLogState;
+
+const ELLIPSIS: &str = "...";
 
 pub(super) fn fit_to_width(text: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
     }
 
-    let text_len = text.chars().count();
-    if text_len <= width {
+    if measure_text_width(text) <= width {
         return text.to_string();
     }
 
-    if width <= 3 {
+    if width <= ELLIPSIS.len() {
         return ".".repeat(width);
     }
 
-    let mut fitted = text.chars().take(width - 3).collect::<String>();
-    fitted.push_str("...");
-    fitted
+    truncate_str(text, width, ELLIPSIS).into_owned()
+}
+
+/// Reduce one raw stream chunk to the single screen row a terminal would show:
+/// keep the text after the last carriage return (git progress redraws), drop ANSI
+/// escapes, and normalize tabs so row accounting stays exact.
+pub(super) fn sanitize_stream_line(raw: &str) -> String {
+    let visible = raw
+        .trim_end_matches(['\r', '\n'])
+        .rsplit('\r')
+        .next()
+        .unwrap_or("");
+
+    strip_ansi_codes(visible)
+        .chars()
+        .map(|character| if character == '\t' { ' ' } else { character })
+        .filter(|character| !character.is_control())
+        .collect()
 }
 
 pub(super) fn display_argument(value: &OsStr) -> String {
@@ -111,9 +127,38 @@ pub(super) fn colorize_state(state: ConcurrentLogState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{colorize_state, display_argument, error_summary};
+    use super::{
+        colorize_state, display_argument, error_summary, fit_to_width, sanitize_stream_line,
+    };
     use crate::project::network::ConcurrentLogState;
+    use console::measure_text_width;
     use std::process::Command;
+
+    #[test]
+    fn fit_to_width_measures_display_width() {
+        let width = 20;
+        let text = "子模组路径 'Modules/BasicComponents'：检出 'abc'";
+
+        let fitted = fit_to_width(text, width);
+
+        assert!(measure_text_width(&fitted) <= width);
+        assert!(fitted.ends_with("..."));
+        assert_eq!(fit_to_width("short", 20), "short");
+        assert_eq!(fit_to_width("abc", 0), "");
+    }
+
+    #[test]
+    fn sanitize_stream_line_keeps_last_progress_segment() {
+        assert_eq!(
+            sanitize_stream_line("Receiving objects:  45%\rReceiving objects: 100%\n"),
+            "Receiving objects: 100%"
+        );
+    }
+
+    #[test]
+    fn sanitize_stream_line_strips_ansi_and_tabs() {
+        assert_eq!(sanitize_stream_line("\u{1b}[32mok\u{1b}[0m\ta\n"), "ok a");
+    }
 
     #[test]
     fn display_argument_quotes_values_with_spaces() {

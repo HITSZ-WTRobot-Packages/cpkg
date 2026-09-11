@@ -556,6 +556,7 @@ fn init_tracing(verbose: bool) -> Result<()> {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
+        .with_writer(cpkg::project::network::PanelAwareWriter)
         .try_init()
         .map_err(|error| anyhow::anyhow!("failed to initialize tracing subscriber: {error}"))
 }

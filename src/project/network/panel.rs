@@ -1,12 +1,14 @@
 use anyhow::{Context, Result};
 use console::{Term, style};
-use std::io::{BufRead, BufReader, Read};
-use std::sync::{Arc, Mutex, MutexGuard, mpsc};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::sync::{Arc, Mutex, MutexGuard, Weak, mpsc};
 use std::thread;
 use tracing::debug;
 
 use super::ConcurrentLogState;
-use super::format::{colorize_prefix, colorize_state, fit_to_width, state_label};
+use super::format::{
+    colorize_prefix, colorize_state, fit_to_width, sanitize_stream_line, state_label,
+};
 
 pub(super) const PANEL_MAX_LOG_LINES: usize = 6;
 const PANEL_MAX_TASK_LINES: usize = 4;
@@ -268,11 +270,11 @@ impl GroupedLogState {
         task_id: usize,
         state: ConcurrentLogState,
         message: Option<String>,
-    ) -> Result<()> {
+    ) -> Result<Option<CompletedTaskDebugSnapshot>> {
         let replay_debug_logs = self.should_replay_task_debug_logs(state);
         let Some((label, title, command, debug_snapshot)) = ({
             let Some(task) = self.task_mut(task_id) else {
-                return Ok(());
+                return Ok(None);
             };
             task.set_state(state, message.clone());
             Some((
@@ -282,16 +284,13 @@ impl GroupedLogState {
                 replay_debug_logs.then(|| CompletedTaskDebugSnapshot::from(&*task)),
             ))
         }) else {
-            return Ok(());
+            return Ok(None);
         };
         self.last_updated_task_id = Some(task_id);
 
         if self.is_tty {
             if debug_snapshot.is_some() {
                 self.clear_rendered()?;
-                if let Some(snapshot) = &debug_snapshot {
-                    emit_task_completion_debug_logs(snapshot);
-                }
             }
             self.render()?;
         } else {
@@ -309,12 +308,9 @@ impl GroupedLogState {
                     style(format!("$ {}", command)).dim()
                 ))?;
             }
-            if let Some(snapshot) = &debug_snapshot {
-                emit_task_completion_debug_logs(snapshot);
-            }
         }
 
-        Ok(())
+        Ok(debug_snapshot)
     }
 
     fn update_task_state_by_label(
@@ -322,7 +318,7 @@ impl GroupedLogState {
         label: &str,
         state: ConcurrentLogState,
         message: &str,
-    ) -> Result<()> {
+    ) -> Result<Option<CompletedTaskDebugSnapshot>> {
         let Some(task_id) = self
             .tasks
             .iter()
@@ -333,7 +329,7 @@ impl GroupedLogState {
             if !self.is_tty {
                 write_grouped_event(label, state, message)?;
             }
-            return Ok(());
+            return Ok(None);
         };
 
         self.update_task_state(task_id, state, Some(message.to_string()))
@@ -372,11 +368,16 @@ impl GroupedLogState {
         }
     }
 
-    fn clear_rendered(&mut self) -> Result<()> {
+    fn clear_rows(&mut self) -> Result<()> {
         if self.rendered_lines > 0 {
             Term::stderr().clear_last_lines(self.rendered_lines)?;
             self.rendered_lines = 0;
         }
+        Ok(())
+    }
+
+    fn clear_rendered(&mut self) -> Result<()> {
+        self.clear_rows()?;
         self.release_cursor();
         Ok(())
     }
@@ -398,13 +399,11 @@ impl GroupedLogState {
             Term::stderr().clear_last_lines(self.rendered_lines)?;
         }
 
-        let (_, columns) = Term::stderr().size();
-        let width = usize::from(columns.saturating_sub(1)).max(20);
-        let lines = if self.tasks.len() <= 1 {
-            self.render_single_task(width)
-        } else {
-            self.render_multi_task(width)
-        };
+        let (rows, columns) = Term::stderr().size();
+        let columns = if columns == 0 { 80 } else { columns };
+        let width = usize::from(columns).saturating_sub(1).max(1);
+        let max_rows = usize::from(rows).saturating_sub(1).max(4);
+        let lines = self.render_lines(width, max_rows);
 
         for line in &lines {
             Term::stderr().write_line(line)?;
@@ -414,7 +413,29 @@ impl GroupedLogState {
         Ok(())
     }
 
-    fn render_single_task(&self, width: usize) -> Vec<String> {
+    /// Build the panel body: every returned line fits `width` display cells and the
+    /// total never exceeds `max_rows`. An empty task list renders nothing so log
+    /// records can be written before the first task starts.
+    fn render_lines(&self, width: usize, max_rows: usize) -> Vec<String> {
+        if self.tasks.is_empty() {
+            return Vec::new();
+        }
+
+        let mut max_log_lines = PANEL_MAX_LOG_LINES;
+        loop {
+            let lines = if self.tasks.len() <= 1 {
+                self.render_single_task(width, max_log_lines)
+            } else {
+                self.render_multi_task(width, max_log_lines)
+            };
+            if lines.len() <= max_rows || max_log_lines == 0 {
+                return lines;
+            }
+            max_log_lines -= 1;
+        }
+    }
+
+    fn render_single_task(&self, width: usize, max_log_lines: usize) -> Vec<String> {
         let task = self
             .tasks
             .first()
@@ -431,21 +452,24 @@ impl GroupedLogState {
             width,
         ));
         lines.push(fit_to_width(&format!("│ Cmd: {}", task.command), width));
-        if task.recent_lines.is_empty() {
-            lines.push(fit_to_width("│ Waiting for command output...", width));
+        let shown = task.recent_lines.len().min(max_log_lines);
+        if shown == 0 {
+            if max_log_lines > 0 {
+                lines.push(fit_to_width("│ Waiting for command output...", width));
+            }
         } else {
-            for line in &task.recent_lines {
+            for line in &task.recent_lines[task.recent_lines.len() - shown..] {
                 lines.push(fit_to_width(&format!("│ {}", line), width));
             }
         }
         lines.push(fit_to_width(
-            &format!("╰─ Showing last {} log line(s)", task.recent_lines.len()),
+            &format!("╰─ Showing last {} log line(s)", shown),
             width,
         ));
         lines
     }
 
-    fn render_multi_task(&self, width: usize) -> Vec<String> {
+    fn render_multi_task(&self, width: usize, max_log_lines: usize) -> Vec<String> {
         let mut lines = Vec::new();
         lines.push(
             style(fit_to_width("╭─ Network activity", width))
@@ -476,10 +500,13 @@ impl GroupedLogState {
             ));
         }
 
-        if self.recent_lines.is_empty() {
-            lines.push(fit_to_width("│ Waiting for network output...", width));
+        let shown = self.recent_lines.len().min(max_log_lines);
+        if shown == 0 {
+            if max_log_lines > 0 {
+                lines.push(fit_to_width("│ Waiting for network output...", width));
+            }
         } else {
-            for line in &self.recent_lines {
+            for line in &self.recent_lines[self.recent_lines.len() - shown..] {
                 lines.push(fit_to_width(&format!("│ {}", line), width));
             }
         }
@@ -503,9 +530,7 @@ impl GroupedLogState {
         } else {
             format!(
                 "╰─ {} active, {} completed, showing last {} log line(s)",
-                active_count,
-                completed_count,
-                self.recent_lines.len()
+                active_count, completed_count, shown
             )
         };
         lines.push(fit_to_width(&footer, width));
@@ -539,6 +564,85 @@ fn write_grouped_event(label: &str, state: ConcurrentLogState, message: &str) ->
     Ok(())
 }
 
+/// Live panel currently owning the terminal, registered while a network batch runs.
+static ACTIVE_PANEL: Mutex<Option<Weak<Mutex<GroupedLogState>>>> = Mutex::new(None);
+
+fn lock_registry() -> MutexGuard<'static, Option<Weak<Mutex<GroupedLogState>>>> {
+    ACTIVE_PANEL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Only coordinate when both streams share one terminal; otherwise log output
+/// cannot land inside the panel region.
+fn register_panel(inner: &Arc<Mutex<GroupedLogState>>) {
+    if !(Term::stderr().is_term() && Term::stdout().is_term()) {
+        return;
+    }
+    *lock_registry() = Some(Arc::downgrade(inner));
+}
+
+fn unregister_panel(inner: &Arc<Mutex<GroupedLogState>>) {
+    let mut slot = lock_registry();
+    if slot
+        .as_ref()
+        .and_then(Weak::upgrade)
+        .is_some_and(|active| Arc::ptr_eq(&active, inner))
+    {
+        *slot = None;
+    }
+}
+
+/// Write one external log record, keeping the panel intact and on-screen.
+fn write_log_record(bytes: &[u8]) -> std::io::Result<()> {
+    let Some(panel) = lock_registry().as_ref().and_then(Weak::upgrade) else {
+        return std::io::stdout().write_all(bytes);
+    };
+    let Ok(mut state) = panel.lock() else {
+        return std::io::stdout().write_all(bytes);
+    };
+    let _ = state.clear_rows();
+    let result = std::io::stdout().write_all(bytes);
+    let _ = state.render();
+    result
+}
+
+/// Writer for the tracing subscriber so log records never corrupt the live panel.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PanelAwareWriter;
+
+#[derive(Default)]
+pub struct PanelAwareLog {
+    buffer: Vec<u8>,
+}
+
+impl std::io::Write for PanelAwareLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.buffer.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for PanelAwareLog {
+    fn drop(&mut self) {
+        if !self.buffer.is_empty() {
+            let _ = write_log_record(&self.buffer);
+        }
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for PanelAwareWriter {
+    type Writer = PanelAwareLog;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        PanelAwareLog::default()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct NetworkBatchLogger {
     inner: Arc<Mutex<GroupedLogState>>,
@@ -546,9 +650,9 @@ pub(crate) struct NetworkBatchLogger {
 
 impl NetworkBatchLogger {
     pub(crate) fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(GroupedLogState::new())),
-        }
+        let inner = Arc::new(Mutex::new(GroupedLogState::new()));
+        register_panel(&inner);
+        Self { inner }
     }
 
     pub(super) fn start_task(
@@ -565,8 +669,9 @@ impl NetworkBatchLogger {
     }
 
     pub(crate) fn log_retry(&self, label: &str, message: &str) -> Result<()> {
-        self.lock_state()?
-            .update_task_state_by_label(label, ConcurrentLogState::Retrying, message)
+        self.apply_task_update(|state| {
+            state.update_task_state_by_label(label, ConcurrentLogState::Retrying, message)
+        })
     }
 
     pub(crate) fn set_parallel_task_mode(&self, enabled: bool) -> Result<()> {
@@ -575,13 +680,31 @@ impl NetworkBatchLogger {
     }
 
     pub(crate) fn finish_success(&self) -> Result<()> {
+        unregister_panel(&self.inner);
         self.lock_state()?.finish_success()
     }
 
     pub(crate) fn finish_failure(&self) {
+        unregister_panel(&self.inner);
         if let Ok(mut state) = self.lock_state() {
             state.finish_failure();
         }
+    }
+
+    /// Run a panel update under the lock, then replay captured debug logs outside it:
+    /// the log writer takes the same lock, so replaying inside would self-deadlock.
+    fn apply_task_update(
+        &self,
+        update: impl FnOnce(&mut GroupedLogState) -> Result<Option<CompletedTaskDebugSnapshot>>,
+    ) -> Result<()> {
+        let snapshot = {
+            let mut state = self.lock_state()?;
+            update(&mut state)?
+        };
+        if let Some(snapshot) = snapshot {
+            emit_task_completion_debug_logs(&snapshot);
+        }
+        Ok(())
     }
 
     fn lock_state(&self) -> Result<MutexGuard<'_, GroupedLogState>> {
@@ -604,19 +727,19 @@ impl NetworkTaskHandle {
     }
 
     pub(super) fn finish_success(&self) -> Result<()> {
-        self.logger.lock_state()?.update_task_state(
-            self.task_id,
-            ConcurrentLogState::Completed,
-            None,
-        )
+        self.logger.apply_task_update(|state| {
+            state.update_task_state(self.task_id, ConcurrentLogState::Completed, None)
+        })
     }
 
     pub(super) fn finish_failure(&self, message: &str) -> Result<()> {
-        self.logger.lock_state()?.update_task_state(
-            self.task_id,
-            ConcurrentLogState::Failed,
-            Some(message.to_string()),
-        )
+        self.logger.apply_task_update(|state| {
+            state.update_task_state(
+                self.task_id,
+                ConcurrentLogState::Failed,
+                Some(message.to_string()),
+            )
+        })
     }
 }
 
@@ -638,7 +761,7 @@ pub(super) fn read_stream<R: Read + Send + 'static>(
             }
 
             captured.push_str(&buffer);
-            let line = buffer.trim_end_matches(['\r', '\n']).to_string();
+            let line = sanitize_stream_line(&buffer);
             if !line.is_empty() {
                 let _ = sender.send(StreamEvent { kind, line });
             }
@@ -661,10 +784,74 @@ pub(super) fn join_reader(
 #[cfg(test)]
 mod tests {
     use super::{
-        CompletedTaskDebugSnapshot, GroupedTask, PANEL_MAX_LOG_LINES, StreamKind,
-        task_completion_debug_message,
+        CompletedTaskDebugSnapshot, GroupedLogState, GroupedTask, PANEL_MAX_LOG_LINES, StreamKind,
+        join_reader, read_stream, task_completion_debug_message,
     };
     use crate::project::network::ConcurrentLogState;
+    use console::measure_text_width;
+    use std::io::Cursor;
+
+    fn panel_with_tasks(tasks: Vec<GroupedTask>) -> GroupedLogState {
+        GroupedLogState {
+            is_tty: true,
+            cursor_hidden: false,
+            rendered_lines: 0,
+            next_task_id: tasks.len(),
+            parallel_task_mode: false,
+            tasks,
+            recent_lines: Vec::new(),
+            last_updated_task_id: None,
+        }
+    }
+
+    #[test]
+    fn read_stream_reports_display_line_without_losing_capture() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let handle = read_stream(
+            Cursor::new(b"progress 10%\rprogress 100%\n".to_vec()),
+            StreamKind::Stderr,
+            sender,
+        );
+
+        let events = receiver.into_iter().collect::<Vec<_>>();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].line, "progress 100%");
+        assert_eq!(
+            join_reader(handle, "stderr").unwrap(),
+            "progress 10%\rprogress 100%\n"
+        );
+    }
+
+    #[test]
+    fn render_lines_stays_within_terminal_width_and_height() {
+        let long_cjk =
+            "子模组 'Modules/BasicComponents' 已对路径 'Modules/BasicComponents' 注册并检出完成";
+        let mut first = GroupedTask::new(0, "BasicComponents", "initializing submodule", "git x");
+        let mut second = GroupedTask::new(1, "ChassisController", "pulling latest", "git y");
+        for index in 0..(PANEL_MAX_LOG_LINES + 2) {
+            first.push_line(StreamKind::Stderr, &format!("{long_cjk} {index}"));
+            second.push_line(StreamKind::Stdout, &format!("{long_cjk} {index}"));
+        }
+        first.set_state(ConcurrentLogState::Completed, None);
+        let state = panel_with_tasks(vec![first, second]);
+
+        for width in [20, 40, 120] {
+            let lines = state.render_lines(width, 6);
+
+            assert!(
+                lines.len() <= 6,
+                "width {width} produced {} rows",
+                lines.len()
+            );
+            for line in &lines {
+                assert!(
+                    measure_text_width(line) <= width,
+                    "width {width} overflowed with {line:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn recent_log_line_limit_stays_small() {
