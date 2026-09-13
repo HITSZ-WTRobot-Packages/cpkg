@@ -36,7 +36,7 @@ These rules describe the projects that `cpkg` manages under `/home/syhanjin/work
 ## Product Responsibilities
 
 ### Command Families
-`cpkg` exposes two distinct command families:
+`cpkg` exposes project, package-authoring, and tool-maintenance commands:
 
 - Project-side package manager commands:
   - `cpkg init`
@@ -47,12 +47,14 @@ These rules describe the projects that `cpkg` manages under `/home/syhanjin/work
   - `cpkg package init`
   - `cpkg package generate`
   - `cpkg package create`
+- Tool maintenance:
+  - `cpkg update` downloads the latest official GitHub Release for the current target and replaces the running executable.
 
 When changing CLI behavior, update the help text in `src/main.rs` and verify the relevant `--help` output.
 
 ### Repository Layout
 - Keep CLI wiring in `src/main.rs` thin.
-- Put reusable logic under `src/lib.rs`, `src/project/`, and `src/package/`.
+- Put reusable logic under `src/lib.rs`, `src/project/`, `src/package/`, and the top-level `src/update.rs` self-update module.
 - Keep distributable user-facing agent skills under `skills/`.
 - Build artifacts belong under `target/` and should remain untracked.
 
@@ -176,6 +178,13 @@ When a change needs to fetch a new crate, refresh `Cargo.lock`, or otherwise upd
 - Local development should not depend on MSVC-specific tooling.
 - CI may use the default Windows toolchain provided by GitHub-hosted runners.
 
+### Self-Update
+- `cpkg update` is independent of firmware-project management and does not require `wtrproject.toml`.
+- Resolve updates only from official `HITSZ-WTRobot-Packages/cpkg` GitHub Releases.
+- Select the exact asset for the running target, require and verify its GitHub SHA-256 digest, and verify the staged binary before replacement.
+- Apply updates without an interactive confirmation, but never auto-elevate through `sudo` or UAC; permission failures must leave the installed executable unchanged.
+- Release builds must embed the exact Git tag so same-version `-fixN` updates are recognized and not repeatedly installed.
+
 ### Testing
 - Place unit tests next to the code they validate using `#[cfg(test)] mod tests`.
 - Cover `wtrproject.toml` behavior, package-index loading, dependency resolution, submodule and integration generation logic, and `cpkg.toml` migrations.
@@ -183,6 +192,7 @@ When a change needs to fetch a new crate, refresh `Cargo.lock`, or otherwise upd
 - Add focused regression tests for CLI parsing changes when behavior is non-trivial.
 - Run the most targeted checks first, then broader validation such as `cargo test --offline`.
 - If dependency changes require network access or a lockfile refresh, use the smallest non-offline Cargo command that unblocks verification, then resume targeted checks.
+- `cargo run --offline -- update --help` inspects self-update options and behavior.
 
 ## Contribution Conventions
 

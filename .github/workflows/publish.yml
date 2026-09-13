@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   build-artifacts:
+    if: github.ref_type == 'tag'
     name: Build ${{ matrix.platform.name }} release artifact
     runs-on: ${{ matrix.platform.runner }}
     strategy:
@@ -55,6 +56,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
+        env:
+          CPKG_RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: cargo build --release --locked --target ${{ matrix.platform.target }}
 
       - name: Package Unix archive
@@ -89,6 +92,7 @@ jobs:
           if-no-files-found: error
 
   publish-release:
+    if: github.ref_type == 'tag'
     name: Publish GitHub release
     needs: build-artifacts
     runs-on: ubuntu-latest

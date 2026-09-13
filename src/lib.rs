@@ -1,6 +1,9 @@
 pub mod config;
 pub mod package;
 pub mod project;
+mod update;
+
+pub use update::update as update_cpkg;
 
 pub use config::{
     IndexSourceConfig, add_global_index_source, clear_global_default_org_source,

@@ -2,10 +2,11 @@
 
 `cpkg` 是一个面向 STM32CubeMX 固件仓库的命令行包管理器，同时也提供 WTR 驱动包作者工具链。
 
-它解决两类问题：
+它覆盖三类工作：
 
 - **项目侧依赖管理**：在 STM32CubeMX 工程根目录维护 `wtrproject.toml`，解析包索引，拉取 `Modules/` 下的 Git submodule，生成 `cmake/wtr_modules.cmake`，并按每个包的 `cpkg.toml` 自动再生其派生的 `CMakeLists.txt`
 - **包侧元数据生成**：在驱动包目录维护 `cpkg.toml`，扫描源码/头文件并生成对应的 `CMakeLists.txt`
+- **工具自更新**：从官方 GitHub Releases 获取适用于当前编译目标的最新正式版本，并在验证后原地替换当前 `cpkg` 可执行文件
 
 ## 功能概览
 
@@ -18,6 +19,7 @@
 - 交互式编辑项目直接依赖
 - 为驱动包生成或迁移 `cpkg.toml`
 - 为驱动包自动生成 `CMakeLists.txt`（派生产物，不提交）
+- 使用 `cpkg update` 安全更新 `cpkg` 自身
 
 ## 安装
 
@@ -48,9 +50,22 @@ README 不提供 Linux 安装帮助。Linux 用户如需使用，请按自己的
    cpkg --version
    ```
 
+
+### 更新已安装的 `cpkg`
+
+```bash
+cpkg update
+```
+
+该命令不依赖 `wtrproject.toml`，可在任意目录运行。它会访问 `HITSZ-WTRobot-Packages/cpkg` 的 GitHub Releases，选择适用于当前编译目标的最新正式 Release，并直接更新当前正在运行的 `cpkg` 可执行文件；已是最新版时只报告当前状态。
+
+更新过程中，`cpkg` 要求 Release 资源提供 SHA-256 digest 并完成校验，还会先对暂存的新二进制执行 `--version`，确认版本输出符合预期后才原地替换。命令不会请求确认，也不会自动使用 `sudo` 或触发其他提权；当前可执行文件所在的安装位置必须可写，否则更新会失败并保留原文件。需要更高权限时，请由用户自行以适当权限运行，或将 `cpkg` 安装到可写目录。
+
 ### 从源码构建
 
 适合已经具备 Rust 开发环境、需要参与开发或想使用最新代码的用户。
+
+从源码构建需要 Rust 1.88 或更高版本。
 
 ```bash
 git clone https://github.com/HITSZ-WTRobot-Packages/cpkg.git
@@ -82,7 +97,13 @@ cargo build --release
 - `cpkg package generate` 会扫描当前目录下的 `.c/.cpp/.h/.hpp` 文件来生成 `CMakeLists.txt`
 - 包目录的 `CMakeLists.txt` 是派生产物：项目侧 `cpkg sync` 会依据 `cpkg.toml` 自动再生它，驱动仓库应当用 `.gitignore` 排除、不要提交
 
-## 两种工作流
+### 工具自更新前提
+
+- `cpkg update` 是独立的工具维护命令，不要求当前目录存在 `wtrproject.toml`、`.ioc` 或 `cpkg.toml`
+- 需要能够访问官方 GitHub Releases
+- 当前 `cpkg` 可执行文件所在的安装位置必须可写；命令不会自动提权
+
+## 三种工作流
 
 ### 1. 项目侧：管理 STM32CubeMX 固件项目依赖
 
@@ -105,6 +126,12 @@ cargo build --release
 - `cpkg package create`
 
 这套流程围绕 `cpkg.toml` 工作。
+
+### 3. 工具侧：更新 `cpkg` 自身
+
+- `cpkg update`
+
+这套流程独立于项目侧和包侧工作流，不读取或修改 `wtrproject.toml`、`Modules/`、`cpkg.toml` 或全局镜像配置。
 
 ## 快速开始：项目侧工作流
 
@@ -364,6 +391,7 @@ dependencies = ["bsp::CANDriver"]
 
 ```bash
 cpkg --help
+cpkg update --help
 cpkg init --help
 cpkg list --help
 cpkg add --help

@@ -11,7 +11,7 @@ use cpkg::{
     init_project_interactive, list_available_packages, move_global_index_source,
     project::write_init_integration_guidance, remove_global_index_source, remove_global_org_source,
     remove_packages, set_global_default_org_source, set_global_index_source, set_global_org_source,
-    show_global_config, show_global_index_sources, sync_project,
+    show_global_config, show_global_index_sources, sync_project, update_cpkg,
 };
 
 #[derive(Parser)]
@@ -38,6 +38,7 @@ cpkg add -I --submodule-protocol https\n  \
 cpkg -v sync\n  \
 cpkg sync --submodule-protocol ssh\n  \
 cpkg sync --offline\n  \
+cpkg update\n  \
 cpkg config init\n  \
 cpkg config show\n  \
 cpkg config index list\n  \
@@ -66,6 +67,8 @@ enum Commands {
     Remove(RemoveArgs),
     /// Synchronize submodules, regenerate package CMake files, and refresh project links.
     Sync(SyncArgs),
+    /// Download and install the latest cpkg release from GitHub
+    Update,
     /// Show or update global mirror configuration under `~/.cpkg/config.toml`.
     Config {
         #[command(subcommand)]
@@ -448,6 +451,10 @@ pub fn run() -> Result<()> {
             );
             sync_project(cwd, args.sync.into())?;
         }
+        Commands::Update => {
+            debug!("running update command");
+            update_cpkg()?;
+        }
         Commands::Config { command } => match command {
             ConfigCommands::Init(args) => {
                 debug!(force = args.force, "running config init command");
@@ -568,6 +575,7 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Add(_) => "add",
         Commands::Remove(_) => "remove",
         Commands::Sync(_) => "sync",
+        Commands::Update => "update",
         Commands::Config { .. } => "config",
         Commands::Package { .. } => "package",
     }
@@ -598,6 +606,21 @@ mod tests {
             Commands::Sync(args) => assert!(!args.sync.offline),
             _ => panic!("expected sync command"),
         }
+    }
+
+    #[test]
+    fn update_parses_without_arguments() {
+        let cli = Cli::try_parse_from(["cpkg", "update"]).unwrap();
+
+        assert!(matches!(cli.command, Commands::Update));
+    }
+
+    #[test]
+    fn long_help_describes_update_and_includes_example() {
+        let help = Cli::command().render_long_help().to_string();
+
+        assert!(help.contains("Download and install the latest cpkg release from GitHub"));
+        assert!(help.contains("cpkg update"));
     }
 
     #[test]
