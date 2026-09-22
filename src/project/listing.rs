@@ -3,7 +3,7 @@ use console::{Term, colors_enabled, style};
 use std::path::Path;
 use tracing::debug;
 
-use super::index::{self, PackageIndex};
+use super::index::{self, IndexPolicy, PackageIndex};
 use super::interactive::{PackageChoice, group_packages_by_repository};
 use super::manifest::{
     self, CURRENT_FORMAT_VERSION, DependencySection, IndexSection, OrgSection, ProjectSection,
@@ -23,18 +23,14 @@ fn default_listing_manifest() -> WtrProject {
     }
 }
 
-fn load_index_for_listing(root: &Path, offline: bool) -> Result<PackageIndex> {
+fn load_index_for_listing(root: &Path, policy: IndexPolicy) -> Result<PackageIndex> {
     let manifest = if manifest::manifest_path(root).exists() {
         manifest::load(root)?
     } else {
         default_listing_manifest()
     };
 
-    if offline {
-        index::load_for_project_without_refresh(root, &manifest)
-    } else {
-        index::load_for_project(root, &manifest)
-    }
+    index::load_for_project(root, &manifest, policy)
 }
 
 fn count_label(count: usize, singular: &str, plural: &str) -> String {
@@ -145,10 +141,10 @@ pub(crate) fn render_package_tree_lines(index: &PackageIndex) -> Vec<String> {
     render_package_tree_lines_with_color(index, false)
 }
 
-pub fn list_available_packages(root: &Path, offline: bool) -> Result<()> {
-    let index = load_index_for_listing(root, offline)?;
+pub fn list_available_packages(root: &Path, policy: IndexPolicy) -> Result<()> {
+    let index = load_index_for_listing(root, policy)?;
     debug!(
-        offline,
+        ?policy,
         indexed_package_count = index.packages.len(),
         root = %root.display(),
         "listing available packages"
@@ -172,7 +168,7 @@ mod tests {
     use super::{
         load_index_for_listing, render_package_tree_lines, render_package_tree_lines_with_color,
     };
-    use crate::project::index::{IndexedPackage, PackageIndex};
+    use crate::project::index::{IndexPolicy, IndexedPackage, PackageIndex};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -272,7 +268,7 @@ mod tests {
         )
         .unwrap();
 
-        let index = load_index_for_listing(&dir, true).unwrap();
+        let index = load_index_for_listing(&dir, IndexPolicy::Offline).unwrap();
 
         assert_eq!(index.packages.len(), 1);
         assert_eq!(index.packages[0].pkgname, "Demo::Pkg");

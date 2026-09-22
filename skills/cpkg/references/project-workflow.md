@@ -25,12 +25,13 @@ Use one of these forms:
 cpkg init --ioc MyBoard.ioc
 cpkg init --name hero_chassis --ioc Hero.ioc
 cpkg init -I
+cpkg init -Iu
 ```
 
 Effects:
 - Create or overwrite `wtrproject.toml`.
 - Bind the project to an `.ioc` file.
-- Optionally choose initial direct dependencies interactively.
+- Optionally choose initial direct dependencies interactively; `cpkg init -I` reuses the project-local or cached index, and `-u`/`--update-index` refreshes it before the picker.
 - Start `cpkg` ownership of `./Modules` for this repository.
 
 Integration rule after initialization:
@@ -42,23 +43,27 @@ Integration rule after initialization:
 
 ```bash
 cpkg list
+cpkg list -u
 cpkg list --offline
 ```
 
-Use `--offline` when only the project-local or cached index should be used.
+- Default behavior reuses the project-local or cached index; it only downloads when no copy exists.
+- `-u`/`--update-index` refreshes the remote index first.
+- `--offline` never touches the network and fails when no local or cached index exists.
 
 ### Add direct dependencies
 
 ```bash
 cpkg add MotorDrivers::DJI bsp::CANDriver
 cpkg add -I
+cpkg add -Iu
 cpkg add --offline MotorDrivers::DJI
 cpkg add MotorDrivers::DJI --submodule-protocol https
 ```
 
 Effects:
 - Update `wtrproject.toml`.
-- Resolve direct and transitive dependencies.
+- Resolve direct and transitive dependencies against the project-local or cached index, unless `-u`/`--update-index` refreshes it first.
 - Synchronize the required repositories under `Modules/` unless the run is offline or blocked by network limits.
 - Regenerate `cmake/wtr_modules.cmake`.
 - Regenerate `CMakeLists.txt` for every resolved package from its `cpkg.toml`. That file is derived output; driver repositories exclude it through `.gitignore` and must not commit it.
@@ -85,12 +90,13 @@ Effects:
 
 ```bash
 cpkg sync
+cpkg sync -u
 cpkg sync --offline
 cpkg sync --submodule-protocol ssh
 ```
 
 Effects:
-- Refresh the package index unless `--offline` is set.
+- Reuse the project-local or cached package index; `-u`/`--update-index` refreshes the remote index before resolving, and a failed refresh aborts the command instead of using the stale cache.
 - Re-resolve the active dependency graph.
 - Synchronize required repositories under `Modules/`.
 - Regenerate `cmake/wtr_modules.cmake`.

@@ -11,7 +11,8 @@ use super::updates::{
     update_manifest_then,
 };
 use super::{
-    index, integration, interactive,
+    index::{self, IndexPolicy},
+    integration, interactive,
     manifest::{self, ProjectInitOptions, WtrProject, load, save, validate_stm32_project},
     packages,
     resolver::{self, ResolvedProject, SubmoduleProtocol},
@@ -30,6 +31,14 @@ pub struct SyncSummary {
 pub struct SyncOptions {
     pub submodule_protocol: Option<SubmoduleProtocol>,
     pub offline: bool,
+    pub update_index: bool,
+}
+
+impl SyncOptions {
+    /// Effective package-index policy for this run.
+    pub fn index_policy(self) -> IndexPolicy {
+        IndexPolicy::from_flags(self.offline, self.update_index)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,15 +109,12 @@ fn load_index_for_sync(
 ) -> Result<index::PackageIndex> {
     debug!(
         offline = options.offline,
+        update_index = options.update_index,
         direct_dependency_count = manifest.dependencies.packages.len(),
         root = %root.display(),
         "loading package index for project"
     );
-    if options.offline {
-        index::load_for_project_without_refresh(root, manifest)
-    } else {
-        index::load_for_project(root, manifest)
-    }
+    index::load_for_project(root, manifest, options.index_policy())
 }
 
 fn empty_resolved_project() -> ResolvedProject {
@@ -137,7 +143,7 @@ fn resolved_project_for_integration(
     manifest: &WtrProject,
     options: SyncOptions,
 ) -> Result<ResolvedProject> {
-    let index = index::load_for_project_without_refresh(root, manifest)?;
+    let index = index::load_for_project(root, manifest, IndexPolicy::Offline)?;
     resolved_project_from_index(manifest, &index, options)
 }
 
@@ -336,16 +342,21 @@ pub fn remove(root: &Path, packages: &[String]) -> Result<WtrProject> {
     )
 }
 
-pub fn init_interactive(root: &Path, options: ProjectInitOptions) -> Result<Option<WtrProject>> {
+pub fn init_interactive(
+    root: &Path,
+    options: ProjectInitOptions,
+    policy: IndexPolicy,
+) -> Result<Option<WtrProject>> {
     debug!(
         root = %root.display(),
         force = options.force,
         has_explicit_name = options.name.is_some(),
         has_explicit_ioc = options.ioc.is_some(),
+        ?policy,
         "starting interactive project init"
     );
     let mut manifest = manifest::prepare_init(root, &options)?;
-    let index = index::load_for_project(root, &manifest)?;
+    let index = index::load_for_project(root, &manifest, policy)?;
     match interactive::select_dependencies(&index)? {
         None => Ok(None),
         Some(packages) => {

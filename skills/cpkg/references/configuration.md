@@ -63,3 +63,5 @@ Project commands prefer package indexes in this order:
 2. A project-local `cpkg_index.json`
 3. Global index sources from `~/.cpkg/config.toml`
 4. The built-in default remote index and cache
+
+Index refresh is opt-in and separate from package synchronization: cached copies are reused unless the user passes `-u`/`--update-index`, and a download only happens automatically when no local or cached index exists.

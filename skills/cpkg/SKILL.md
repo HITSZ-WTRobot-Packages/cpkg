@@ -31,6 +31,9 @@ description: "Use when an agent needs to operate the `cpkg` CLI for WTR-managed 
 - After `cpkg init`, treat `./Modules` as `cpkg`-managed. Do not ask the user to add module repositories manually.
 - Prefer `--offline` when the user wants cache-only behavior or the network is unavailable.
 - Remember the offline write semantics: `cpkg add --offline` can still update `wtrproject.toml` even if a new repository cannot be fetched until a later online `cpkg sync`.
+- Index updates and package updates are separate: project commands reuse the project-local or cached index by default and must not re-download it unless the user passes `-u`/`--update-index` (supported by `cpkg add`, `cpkg add -I`, `cpkg sync`, `cpkg list`, and `cpkg init -I`).
+- Without `-u`, the remote index is downloaded only when neither a project-local index nor a cached copy exists, so a first run needs no extra flag; pass `-u` when the user needs the latest indexed packages.
+- `-u`/`--update-index` conflicts with `--offline`, and an explicit refresh failure aborts the command instead of falling back to the stale cached copy.
 - Treat `cpkg update` as an online, direct update: it accesses GitHub, verifies the Release SHA-256 digest and staged binary version, and replaces the current executable without confirmation.
 - Do not expect automatic elevation. Run it only when the current executable's installation location is writable, or use user-chosen appropriate privileges.
 

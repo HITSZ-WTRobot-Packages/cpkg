@@ -5,13 +5,14 @@ use tracing::debug;
 use tracing_subscriber::EnvFilter;
 
 use cpkg::{
-    IndexSourceConfig, ProjectInitOptions, SubmoduleProtocol, SyncOptions, add_global_index_source,
-    add_packages_and_sync, add_packages_interactive, clear_global_default_org_source,
-    create_package, generate_package, init_global_config, init_package, init_project,
-    init_project_interactive, list_available_packages, move_global_index_source,
-    project::write_init_integration_guidance, remove_global_index_source, remove_global_org_source,
-    remove_packages, set_global_default_org_source, set_global_index_source, set_global_org_source,
-    show_global_config, show_global_index_sources, sync_project, update_cpkg,
+    IndexPolicy, IndexSourceConfig, ProjectInitOptions, SubmoduleProtocol, SyncOptions,
+    add_global_index_source, add_packages_and_sync, add_packages_interactive,
+    clear_global_default_org_source, create_package, generate_package, init_global_config,
+    init_package, init_project, init_project_interactive, list_available_packages,
+    move_global_index_source, project::write_init_integration_guidance, remove_global_index_source,
+    remove_global_org_source, remove_packages, set_global_default_org_source,
+    set_global_index_source, set_global_org_source, show_global_config, show_global_index_sources,
+    sync_project, update_cpkg,
 };
 
 #[derive(Parser)]
@@ -21,7 +22,8 @@ use cpkg::{
     about = "STM32CubeMX package manager for WTR projects",
     long_about = "cpkg manages STM32CubeMX-based firmware projects and WTR driver packages.\n\n\
 The project-side workflow uses `wtrproject.toml` to track direct dependencies, \
-downloads a package index, resolves transitive dependencies, and synchronizes \
+reuses the project-local or cached package index (refreshed only with `--update-index`), \
+resolves transitive dependencies, and synchronizes \
 driver repositories into `Modules/` as Git submodules.\n\n\
 Package-authoring commands stay under `cpkg package ...` and manage individual \
 driver-package metadata with `cpkg.toml`; each package's generated `CMakeLists.txt` \
@@ -30,6 +32,7 @@ Use `-v` or `--verbose` to enable debug logging.",
     after_help = "Examples:\n  \
 cpkg init --ioc MyBoard.ioc\n  \
 cpkg init -I\n  \
+cpkg init -Iu\n  \
 cpkg list\n  \
 cpkg list --offline\n  \
 cpkg add MotorDrivers::DJI bsp::CANDriver\n  \
@@ -38,6 +41,7 @@ cpkg add -I --submodule-protocol https\n  \
 cpkg -v sync\n  \
 cpkg sync --submodule-protocol ssh\n  \
 cpkg sync --offline\n  \
+cpkg sync -u\n  \
 cpkg update\n  \
 cpkg config init\n  \
 cpkg config show\n  \
@@ -87,7 +91,10 @@ enum Commands {
     after_help = "Examples:\n  \
 cpkg init --ioc MyBoard.ioc\n  \
 cpkg init --name hero_chassis --ioc Hero.ioc\n  \
-cpkg init -I\n\n\
+cpkg init -I\n  \
+cpkg init -Iu\n\n\
+`cpkg init -I` reuses the project-local or cached package index; pass `-u`/`--update-index` to \
+refresh it before the picker.\n\n\
 After `cpkg sync`, include `cmake/wtr_modules.cmake` from the root `CMakeLists.txt`, \
 then call `wtr_link_packages(<target>)` or `wtr_link_packages_public(<target>)`."
 )]
@@ -98,6 +105,9 @@ struct ProjectInitArgs {
     /// Open an interactive tree picker for the initial dependencies.
     #[arg(short = 'I', long)]
     interactive: bool,
+    /// Refresh the package index before the picker; requires `--interactive`.
+    #[arg(short = 'u', long, requires = "interactive")]
+    update_index: bool,
     /// Explicit project name to write into `wtrproject.toml`.
     #[arg(long)]
     name: Option<String>,
@@ -114,7 +124,10 @@ cpkg add MotorDrivers::DJI\n  \
 cpkg add MotorDrivers::DJI bsp::CANDriver --submodule-protocol ssh\n  \
 cpkg add --offline MotorDrivers::DJI\n  \
 cpkg add -I --submodule-protocol https\n  \
-cpkg add -I MotorDrivers::DJI\n\n\
+cpkg add -I MotorDrivers::DJI\n  \
+cpkg add -Iu\n\n\
+The package index is reused from the project-local file or the cache; pass `-u`/`--update-index` \
+to refresh it from its remote source first. `--update-index` conflicts with `--offline`.\n\n\
 If `cpkg add --offline` records a dependency that cannot be applied without fetching a new \
 repository, it still updates `wtrproject.toml`; run `cpkg sync` online later to apply it.\n\n\
 This command also regenerates `CMakeLists.txt` for every resolved driver package from its \
@@ -152,7 +165,10 @@ struct RemoveArgs {
     after_help = "Examples:\n  \
 cpkg sync\n  \
 cpkg sync --submodule-protocol https\n  \
-cpkg sync --offline\n\n\
+cpkg sync --offline\n  \
+cpkg sync -u\n\n\
+The package index is reused from the project-local file or the cache; pass `-u`/`--update-index` \
+to refresh it from its remote source first. `--update-index` conflicts with `--offline`.\n\n\
 This command generates `cmake/wtr_modules.cmake`; include it from the root `CMakeLists.txt` \
 and call `wtr_link_packages(<target>)` or `wtr_link_packages_public(<target>)`.\n\n\
 It also regenerates `CMakeLists.txt` for every resolved driver package from its `cpkg.toml`; \
@@ -168,15 +184,21 @@ struct SyncArgs {
     about = "List all packages from the active package index in a tree view",
     after_help = "Examples:\n  \
 cpkg list\n  \
-cpkg list --offline\n\n\
+cpkg list --offline\n  \
+cpkg list -u\n\n\
+The index is reused from the project-local file or the cache; pass `-u`/`--update-index` to \
+refresh it from its remote source first. `--update-index` conflicts with `--offline`.\n\n\
 When `wtrproject.toml` exists, this command uses the same package-index lookup order as \
 other project commands. Otherwise it falls back to a project-local `cpkg_index.json`, \
 configured global index sources, or the built-in default index."
 )]
 struct ListArgs {
-    /// Use the project-local or cached package index and skip remote refresh.
+    /// Use the project-local or cached package index and skip all network access.
     #[arg(long)]
     offline: bool,
+    /// Refresh the package index from its remote source; a failed refresh aborts.
+    #[arg(short = 'u', long, conflicts_with = "offline")]
+    update_index: bool,
 }
 
 #[derive(Args, Clone, Copy)]
@@ -188,6 +210,9 @@ struct SyncOptionArgs {
     /// Use the project-local or cached package index and skip Git fetch/pull operations.
     #[arg(long)]
     offline: bool,
+    /// Refresh the package index from its remote source before resolving; a failed refresh aborts.
+    #[arg(short = 'u', long, conflicts_with = "offline")]
+    update_index: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -212,6 +237,7 @@ impl From<SyncOptionArgs> for SyncOptions {
         SyncOptions {
             submodule_protocol: value.submodule_protocol.map(Into::into),
             offline: value.offline,
+            update_index: value.update_index,
         }
     }
 }
@@ -400,6 +426,7 @@ pub fn run() -> Result<()> {
             debug!(
                 interactive = args.interactive,
                 force = args.force,
+                update_index = args.update_index,
                 has_explicit_name = args.name.is_some(),
                 has_explicit_ioc = args.ioc.is_some(),
                 "running init command"
@@ -410,7 +437,11 @@ pub fn run() -> Result<()> {
                 ioc: args.ioc,
             };
             let manifest = if args.interactive {
-                init_project_interactive(cwd, options)?
+                init_project_interactive(
+                    cwd,
+                    options,
+                    IndexPolicy::from_flags(false, args.update_index),
+                )?
             } else {
                 Some(init_project(cwd, options)?)
             };
@@ -419,14 +450,22 @@ pub fn run() -> Result<()> {
             }
         }
         Commands::List(args) => {
-            debug!(offline = args.offline, "running list command");
-            list_available_packages(cwd, args.offline)?;
+            debug!(
+                offline = args.offline,
+                update_index = args.update_index,
+                "running list command"
+            );
+            list_available_packages(
+                cwd,
+                IndexPolicy::from_flags(args.offline, args.update_index),
+            )?;
         }
         Commands::Add(args) => {
             debug!(
                 interactive = args.interactive,
                 package_count = args.packages.len(),
                 offline = args.sync.offline,
+                update_index = args.sync.update_index,
                 submodule_protocol = ?args.sync.submodule_protocol,
                 "running add command"
             );
@@ -446,6 +485,7 @@ pub fn run() -> Result<()> {
         Commands::Sync(args) => {
             debug!(
                 offline = args.sync.offline,
+                update_index = args.sync.update_index,
                 submodule_protocol = ?args.sync.submodule_protocol,
                 "running sync command"
             );
@@ -644,6 +684,48 @@ mod tests {
         match cli.command {
             Commands::List(args) => assert!(args.offline),
             _ => panic!("expected list command"),
+        }
+    }
+
+    #[test]
+    fn add_accepts_stacked_interactive_and_update_index_flags() {
+        let cli = Cli::try_parse_from(["cpkg", "add", "-Iu"]).unwrap();
+
+        match cli.command {
+            Commands::Add(args) => {
+                assert!(args.interactive);
+                assert!(args.sync.update_index);
+            }
+            _ => panic!("expected add command"),
+        }
+    }
+
+    #[test]
+    fn list_accepts_update_index_flag() {
+        let cli = Cli::try_parse_from(["cpkg", "list", "-u"]).unwrap();
+
+        match cli.command {
+            Commands::List(args) => assert!(args.update_index),
+            _ => panic!("expected list command"),
+        }
+    }
+
+    #[test]
+    fn sync_rejects_update_index_together_with_offline() {
+        assert!(Cli::try_parse_from(["cpkg", "sync", "--offline", "-u"]).is_err());
+    }
+
+    #[test]
+    fn init_update_index_requires_interactive() {
+        assert!(Cli::try_parse_from(["cpkg", "init", "-u"]).is_err());
+
+        let cli = Cli::try_parse_from(["cpkg", "init", "-Iu"]).unwrap();
+        match cli.command {
+            Commands::Init(args) => {
+                assert!(args.interactive);
+                assert!(args.update_index);
+            }
+            _ => panic!("expected init command"),
         }
     }
 

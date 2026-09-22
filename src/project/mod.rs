@@ -13,6 +13,7 @@ mod updates;
 mod workflow;
 
 pub use self::feedback::write_init_integration_guidance;
+pub use self::index::IndexPolicy;
 pub use self::listing::list_available_packages;
 pub use self::manifest::{
     DependencySection, IndexSection, OrgSection, ProjectInitOptions, ProjectSection, WtrProject,

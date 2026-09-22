@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::config::{
     GlobalConfig, IndexSourceConfig, cpkg_home_dir, global_config_path, load_global_config,
@@ -15,6 +15,30 @@ use super::{IndexSection, WtrProject};
 
 pub const DEFAULT_INDEX_URL: &str = "https://raw.githubusercontent.com/HITSZ-WTRobot-Packages/index/refs/heads/main/cpkg_index.json";
 pub const DEFAULT_INDEX_FILENAME: &str = "cpkg_index.json";
+
+/// How a command run may obtain the package index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexPolicy {
+    /// Reuse the project-local or cached index; download only when no copy exists yet.
+    Auto,
+    /// Refresh remote sources before use; a refresh failure aborts the command.
+    Refresh,
+    /// Never touch the network; a missing project-local or cached copy aborts the command.
+    Offline,
+}
+
+impl IndexPolicy {
+    /// Map `--offline` and `--update-index` onto the effective policy.
+    pub fn from_flags(offline: bool, update_index: bool) -> Self {
+        if offline {
+            Self::Offline
+        } else if update_index {
+            Self::Refresh
+        } else {
+            Self::Auto
+        }
+    }
+}
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct PackageIndex {
@@ -436,7 +460,7 @@ fn download_index(url: &str, cache_path: &Path) -> Result<()> {
     }
 }
 
-fn load_source_with_refresh(source: &IndexSource) -> Result<PackageIndex> {
+fn load_source(source: &IndexSource, policy: IndexPolicy) -> Result<PackageIndex> {
     match source {
         IndexSource::Local { path, description } => {
             debug!(
@@ -451,20 +475,37 @@ fn load_source_with_refresh(source: &IndexSource) -> Result<PackageIndex> {
             cache_path,
             description,
         } => {
-            debug!(
-                source = %description,
-                url = %url,
-                cache_path = %cache_path.display(),
-                "refreshing remote package index"
-            );
-            if let Err(error) = download_index(url, cache_path) {
-                if cache_path.exists() {
-                    warn!(
-                        "failed to refresh {} from {}: {}; falling back to cached copy",
-                        description, url, error
+            let cached = cache_path.exists();
+            match policy {
+                IndexPolicy::Offline => {
+                    debug!(
+                        source = %description,
+                        cache_path = %cache_path.display(),
+                        "loading cached package index"
                     );
-                } else {
-                    return Err(error);
+                    if !cached {
+                        anyhow::bail!(
+                            "no cached package index found for {} at '{}'",
+                            description,
+                            cache_path.to_string_lossy()
+                        );
+                    }
+                }
+                IndexPolicy::Auto if cached => {
+                    debug!(
+                        source = %description,
+                        cache_path = %cache_path.display(),
+                        "reusing cached package index"
+                    );
+                }
+                IndexPolicy::Auto | IndexPolicy::Refresh => {
+                    debug!(
+                        source = %description,
+                        url = %url,
+                        cache_path = %cache_path.display(),
+                        "downloading package index"
+                    );
+                    download_index(url, cache_path)?;
                 }
             }
             load_from_path(cache_path)
@@ -472,47 +513,11 @@ fn load_source_with_refresh(source: &IndexSource) -> Result<PackageIndex> {
     }
 }
 
-fn load_source_without_refresh(source: &IndexSource) -> Result<PackageIndex> {
-    match source {
-        IndexSource::Local { path, description } => {
-            debug!(
-                source = %description,
-                path = %path.display(),
-                "loading local package index without refresh"
-            );
-            load_from_path(path)
-        }
-        IndexSource::Remote {
-            cache_path,
-            description,
-            ..
-        } => {
-            debug!(
-                source = %description,
-                cache_path = %cache_path.display(),
-                "loading cached package index"
-            );
-            if !cache_path.exists() {
-                anyhow::bail!(
-                    "no cached package index found for {} at '{}'",
-                    description,
-                    cache_path.to_string_lossy()
-                );
-            }
-            load_from_path(cache_path)
-        }
-    }
-}
-
-fn load_from_selection(selection: SourceSelection, refresh: bool) -> Result<PackageIndex> {
+fn load_from_selection(selection: SourceSelection, policy: IndexPolicy) -> Result<PackageIndex> {
     match selection {
         SourceSelection::Strict(source) => {
-            debug!(refresh, "using strict package index source");
-            if refresh {
-                load_source_with_refresh(&source)
-            } else {
-                load_source_without_refresh(&source)
-            }
+            debug!(?policy, "using strict package index source");
+            load_source(&source, policy)
         }
         SourceSelection::Fallback(sources) => {
             let mut errors = Vec::new();
@@ -521,13 +526,8 @@ fn load_from_selection(selection: SourceSelection, refresh: bool) -> Result<Pack
                     IndexSource::Local { description, .. } => description,
                     IndexSource::Remote { description, .. } => description,
                 };
-                debug!(refresh, source = %description, "trying package index source");
-                let result = if refresh {
-                    load_source_with_refresh(&source)
-                } else {
-                    load_source_without_refresh(&source)
-                };
-                match result {
+                debug!(?policy, source = %description, "trying package index source");
+                match load_source(&source, policy) {
                     Ok(index) => return Ok(index),
                     Err(error) => {
                         errors.push(format!("{description}: {error}"));
@@ -556,33 +556,25 @@ fn load_for_project_with_global_config(
     manifest: &WtrProject,
     global_config: &GlobalConfig,
     global_config_dir: &Path,
-    refresh: bool,
+    policy: IndexPolicy,
 ) -> Result<PackageIndex> {
     let sources = determine_sources(root, manifest, global_config, global_config_dir)?;
-    load_from_selection(sources, refresh)
+    load_from_selection(sources, policy)
 }
 
-pub fn load_for_project(root: &Path, manifest: &WtrProject) -> Result<PackageIndex> {
-    let global_config = load_global_config()?;
-    let global_config_dir = default_global_config_dir()?;
-    load_for_project_with_global_config(root, manifest, &global_config, &global_config_dir, true)
-}
-
-pub fn load_for_project_without_refresh(
+pub fn load_for_project(
     root: &Path,
     manifest: &WtrProject,
+    policy: IndexPolicy,
 ) -> Result<PackageIndex> {
     let global_config = load_global_config()?;
     let global_config_dir = default_global_config_dir()?;
-    load_for_project_with_global_config(root, manifest, &global_config, &global_config_dir, false)
+    load_for_project_with_global_config(root, manifest, &global_config, &global_config_dir, policy)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        PackageIndex, load_for_project, load_for_project_with_global_config,
-        load_for_project_without_refresh,
-    };
+    use super::{IndexPolicy, PackageIndex, load_for_project, load_for_project_with_global_config};
     use crate::config::{GlobalConfig, IndexSourceConfig};
     use crate::project::{DependencySection, IndexSection, OrgSection, ProjectSection, WtrProject};
     use std::fs;
@@ -620,13 +612,13 @@ mod tests {
         let dir = make_temp_dir("project-local");
         fs::write(dir.join("cpkg_index.json"), r#"{}"#).unwrap();
 
-        let index = load_for_project(&dir, &empty_manifest()).unwrap();
+        let index = load_for_project(&dir, &empty_manifest(), IndexPolicy::Auto).unwrap();
         assert!(index.packages.is_empty());
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn load_for_project_without_refresh_uses_configured_cache() {
+    fn offline_policy_uses_configured_cache() {
         let dir = make_temp_dir("configured-cache");
         let cache_path = dir.join("cache").join("cpkg_index.json");
         fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
@@ -635,19 +627,82 @@ mod tests {
         let manifest = WtrProject {
             index: IndexSection {
                 path: None,
-                url: Some("https://example.com/cpkg_index.json".to_string()),
+                url: Some("https://example.invalid/cpkg_index.json".to_string()),
                 cache_path: Some("cache/cpkg_index.json".to_string()),
             },
             ..empty_manifest()
         };
 
-        let index = load_for_project_without_refresh(&dir, &manifest).unwrap();
+        let index = load_for_project(&dir, &manifest, IndexPolicy::Offline).unwrap();
         assert!(index.packages.is_empty());
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn global_index_sources_are_tried_in_order_without_refresh() {
+    fn auto_policy_reuses_cached_remote_index_without_downloading() {
+        let dir = make_temp_dir("auto-reuses-cache");
+        let cache_path = dir.join("cache").join("cpkg_index.json");
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(&cache_path, r#"{}"#).unwrap();
+
+        let manifest = WtrProject {
+            index: IndexSection {
+                path: None,
+                url: Some("https://cpkg-index.invalid/cpkg_index.json".to_string()),
+                cache_path: Some("cache/cpkg_index.json".to_string()),
+            },
+            ..empty_manifest()
+        };
+
+        let index = load_for_project(&dir, &manifest, IndexPolicy::Auto).unwrap();
+
+        assert!(index.packages.is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn offline_policy_fails_when_no_cached_copy_exists() {
+        let dir = make_temp_dir("offline-without-cache");
+        let manifest = WtrProject {
+            index: IndexSection {
+                path: None,
+                url: Some("https://example.invalid/cpkg_index.json".to_string()),
+                cache_path: Some("cache/cpkg_index.json".to_string()),
+            },
+            ..empty_manifest()
+        };
+
+        let error = load_for_project(&dir, &manifest, IndexPolicy::Offline).unwrap_err();
+
+        assert!(
+            error.to_string().contains("no cached package index found"),
+            "unexpected error: {error}"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn refresh_policy_fails_instead_of_reusing_stale_cache() {
+        let dir = make_temp_dir("refresh-failure");
+        let cache_path = dir.join("cache").join("cpkg_index.json");
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(&cache_path, r#"{}"#).unwrap();
+
+        let manifest = WtrProject {
+            index: IndexSection {
+                path: None,
+                url: Some("https://cpkg-index.invalid/cpkg_index.json".to_string()),
+                cache_path: Some("cache/cpkg_index.json".to_string()),
+            },
+            ..empty_manifest()
+        };
+
+        assert!(load_for_project(&dir, &manifest, IndexPolicy::Refresh).is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn global_index_sources_are_tried_in_order_offline() {
         let dir = make_temp_dir("global-order");
         let global_dir = dir.join("global");
         fs::create_dir_all(&global_dir).unwrap();
@@ -676,7 +731,7 @@ mod tests {
             &empty_manifest(),
             &global_config,
             &global_dir,
-            false,
+            IndexPolicy::Offline,
         )
         .unwrap();
 
@@ -712,9 +767,14 @@ mod tests {
             ..GlobalConfig::default()
         };
 
-        let index =
-            load_for_project_with_global_config(&dir, &manifest, &global_config, &dir, false)
-                .unwrap();
+        let index = load_for_project_with_global_config(
+            &dir,
+            &manifest,
+            &global_config,
+            &dir,
+            IndexPolicy::Offline,
+        )
+        .unwrap();
 
         assert!(index.packages.is_empty());
         let _ = fs::remove_dir_all(dir);

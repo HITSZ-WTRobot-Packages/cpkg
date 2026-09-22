@@ -155,6 +155,7 @@ cpkg init -I
 - `--ioc <IOC>`：手动指定 `.ioc` 文件
 - `-f, --force`：覆盖已有 `wtrproject.toml`
 - `-I, --interactive`：进入交互式依赖选择
+- `-u, --update-index`：渲染选择器前刷新包索引（需与 `-I` 同用，可写 `cpkg init -Iu`）
 
 初始化后会生成 `wtrproject.toml`。
 
@@ -164,17 +165,26 @@ cpkg init -I
 cpkg list
 ```
 
-如果你只想使用本地或缓存索引，不刷新远程索引：
-
-```bash
-cpkg list --offline
-```
-
 说明：
 
 - `cpkg list` 会按仓库分组，以树状列出当前索引中的所有包
 - 如果当前目录存在 `wtrproject.toml`，会沿用项目配置的索引解析顺序
 - 如果当前目录没有 `wtrproject.toml`，会回退到本地 `cpkg_index.json`、全局索引源或内置默认索引
+- 索引更新与包仓库更新是两件独立的事：只有本地/缓存索引**不存在**时才会自动下载一次，其余情况直接复用已有索引
+
+需要强制刷新远程索引时：
+
+```bash
+cpkg list -u
+```
+
+只想完全不联网、只用本地或缓存索引时：
+
+```bash
+cpkg list --offline
+```
+
+`-u, --update-index` 与 `--offline` 互斥，因为前者要求联网刷新索引。
 
 ### 3. 添加直接依赖
 
@@ -200,6 +210,7 @@ cpkg add -I
 - 如果有新增依赖，会同步 `Modules/` 下所需仓库
 - 会生成或更新 `cmake/wtr_modules.cmake`
 - 会为每个已解析的包按其 `cpkg.toml` 再生 `CMakeLists.txt`（派生文件，不提交）
+- 默认复用项目本地或缓存索引；只有 `-u, --update-index` 才会先刷新远程索引（`cpkg add -Iu` 可简写）
 - `--submodule-protocol` 支持 `ssh` 和 `https`
 - 如果项目未显式设置 `[org].name`，则会优先使用全局 `config.toml` 中的 `default_org`
 - 如果不显式传入 `--submodule-protocol`，则优先使用项目 `[org]` 的 `protocol`，再回退到命名全局 org 源的 `default_protocol`，最后回退到内置默认 `ssh`
@@ -230,9 +241,16 @@ cpkg sync
 cpkg sync --submodule-protocol https
 ```
 
+如果要在解析前刷新远程包索引：
+
+```bash
+cpkg sync -u
+```
+
 说明：
 
-- 会刷新包索引
+- 默认复用项目本地或缓存索引；只有 `-u, --update-index` 才会先刷新远程索引
+- 显式刷新失败时会直接报错退出，不会回退到旧的缓存索引
 - 会解析直接依赖与传递依赖
 - 会同步 `Modules/` 中需要的仓库
 - 会生成 `cmake/wtr_modules.cmake`
@@ -288,6 +306,8 @@ protocol = "ssh"
 2. 项目根目录的 `cpkg_index.json`
 3. `~/.cpkg/config.toml` 中按顺序声明的全局 `[[index]]`
 4. 默认远程索引与本地缓存
+
+索引的**更新**与包仓库的更新互相独立：项目侧命令默认复用已有索引，只有传入 `-u, --update-index` 时才刷新远程索引源（`cpkg add`、`cpkg add -I`、`cpkg sync`、`cpkg list`、`cpkg init -I` 支持该选项）。当本地索引与缓存都不存在时仍会自动下载一次，以免首次使用需要额外参数。
 
 ## 集成到 CMake
 

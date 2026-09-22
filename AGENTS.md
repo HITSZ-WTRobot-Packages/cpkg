@@ -88,13 +88,21 @@ When changing CLI behavior, update the help text in `src/main.rs` and verify the
 ### Dependency Write and Sync Ordering
 - Once the user confirms a direct-dependency change, write `wtrproject.toml` before any follow-up network-backed work so interrupted runs can resume with `cpkg sync`.
 - When `cpkg add` cannot apply a newly added dependency without fetching repository data, keep the updated `wtrproject.toml` and tell the user to run `cpkg sync` online to apply the change.
-- `cpkg add -I` should refresh the package index as soon as the command starts, before rendering the picker, and should reuse that refreshed index for the confirmed selection.
+- `cpkg add -I` should load the package index before rendering the picker and must reuse that exact index for the confirmed selection; it must not refresh the index unless the user passed `--update-index`.
 - Network-backed operations should surface live execution status to the user; prefer a temporary, bounded terminal log panel over silent background work.
 - `cpkg add --offline` and `cpkg sync --offline` should resolve dependencies from the project-local or cached package index without refreshing the remote index.
 - In offline mode, existing submodules should use locally cached repository state only; skip fetch and pull operations.
 - In offline mode, when a newly required repository is not yet registered as a submodule, attempt to register it without fetching repository data; if the installed Git does not support that workflow, report that `--offline` cannot be used for that repository yet.
 - Project-side sync must regenerate every resolved package's `CMakeLists.txt` after submodule synchronization and before writing `cmake/wtr_modules.cmake`, so a failed generation leaves the integration file untouched.
 - Package `CMakeLists.txt` generation failure (unreadable or invalid `cpkg.toml`) aborts project-side sync with a package-identifying error; a missing `cpkg.toml` is only a warning and the package is skipped.
+
+### Package Index Refresh
+- Treat index update and package/repository update as separate operations; never re-download a remote index that is already present unless the user explicitly asks for it.
+- Reuse the project-local index or the cached copy by default; only `-u`/`--update-index` may refresh remote index sources.
+- Expose `-u`/`--update-index` on `cpkg add`, `cpkg add -I`, `cpkg sync`, `cpkg list`, and `cpkg init -I`; on `cpkg init` it requires `--interactive`, and it conflicts with `--offline`.
+- Download a remote index automatically only when neither a project-local index nor a cached copy exists, so a first run needs no extra flag.
+- A failed explicit refresh must abort the command with an error instead of silently falling back to the stale cached copy.
+- `cpkg remove` and interactive removals that add no new dependency must resolve against the local or cached index only and never refresh it.
 
 ### Removal Semantics
 - When `cpkg add -I` only removes packages and adds no new direct dependency, it should:
