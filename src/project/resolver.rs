@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::index::{IndexedPackage, PackageIndex};
 
-const BUILTIN_TARGETS: &[&str] = &["FreeRTOS", "stm32cubemx"];
+const BUILTIN_TARGETS: &[&str] = &["FreeRTOS", "stm32cubemx", "LwIP"];
 const DEFAULT_HTTPS_REPO_BASE_URL: &str = "https://github.com/HITSZ-WTRobot-Packages";
 const DEFAULT_SSH_REPO_BASE_URL: &str = "git@github.com:HITSZ-WTRobot-Packages";
 
