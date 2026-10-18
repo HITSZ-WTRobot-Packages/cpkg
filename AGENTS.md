@@ -27,6 +27,7 @@ These rules describe the projects that `cpkg` manages under `/home/syhanjin/work
 
 ### Driver Package Metadata Management
 - Run `cpkg --help` for top-level usage and `cpkg <COMMAND> --help` before using an unfamiliar subcommand.
+- `cpkg package create` defaults to a flat package directory: place source and header files directly in the package root instead of creating `src/` or `include/` subdirectories.
 - Use `cpkg package init`, `cpkg package generate`, and `cpkg package create` for package-authoring workflows in this repository.
 - When adding or renaming driver source files, update `cpkg.toml` if the package surface changes, regenerate the package `CMakeLists.txt` (`cpkg package generate` in the package directory, or project-side `cpkg sync`), then regenerate the package index.
 - Never hand-edit or commit a package `CMakeLists.txt`: it is regenerated from `cpkg.toml`, and the driver repository should list it in `.gitignore`.

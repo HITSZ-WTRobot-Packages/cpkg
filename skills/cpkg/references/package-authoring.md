@@ -19,7 +19,9 @@ cpkg package create MyDriver
 
 Effects:
 - Create a new package directory.
-- Scaffold `include/` and `src/`.
+- Write `cpkg.toml` in the package root, without creating `include/` or `src/` subdirectories or example code.
+
+Place source and header files directly in the package root, then run `cpkg package generate` there. Existing nested source/header layouts remain supported.
 
 ### Create or migrate package metadata
 

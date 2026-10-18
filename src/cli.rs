@@ -404,9 +404,11 @@ enum PackageCommands {
     },
     /// Regenerate `CMakeLists.txt` for the package in the current directory from `cpkg.toml`.
     Generate,
-    /// Scaffold a new driver-package directory with `include/` and `src/`.
+    /// Create a flat driver-package directory with `cpkg.toml`.
+    ///
+    /// Place source and header files directly in the package root.
     Create {
-        /// Folder name for the new package scaffold.
+        /// Folder name for the new package directory.
         package_name: String,
     },
 }

@@ -32,16 +32,13 @@ pub fn create(root: &Path, package_name: &str) -> Result<()> {
         anyhow::bail!("package folder '{}' already exists", package_name);
     }
 
-    fs::create_dir_all(path.join("include")).context("failed to create include folder")?;
-    fs::create_dir_all(path.join("src")).context("failed to create src folder")?;
+    fs::create_dir_all(&path)
+        .with_context(|| format!("failed to create package folder '{}'", path.display()))?;
 
     let manifest = default_package_manifest(package_name, Vec::new());
     manifest::save(&path.join("cpkg.toml"), &manifest)?;
 
-    info!(
-        "Package '{}' created with include/ and src/ folders",
-        package_name
-    );
+    info!("Package folder '{}' created with cpkg.toml", package_name);
     Ok(())
 }
 
@@ -142,13 +139,16 @@ mod tests {
     }
 
     #[test]
-    fn create_writes_default_version_to_manifest() {
+    fn create_writes_manifest_without_source_or_include_directories() {
         let dir = make_temp_dir("package-create");
 
-        create(&dir, "MotorDrivers::DJI").unwrap();
+        create(&dir, "DJI").unwrap();
 
-        let manifest = fs::read_to_string(dir.join("MotorDrivers::DJI").join("cpkg.toml")).unwrap();
-        assert!(manifest.contains("version = \"0.1.0\""));
+        let package_dir = dir.join("DJI");
+        assert!(package_dir.is_dir());
+        assert!(package_dir.join("cpkg.toml").is_file());
+        assert!(!package_dir.join("src").exists());
+        assert!(!package_dir.join("include").exists());
 
         let _ = fs::remove_dir_all(dir);
     }

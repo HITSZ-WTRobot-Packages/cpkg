@@ -93,7 +93,7 @@ cargo build --release
 ### 包作者命令前提
 
 - 在驱动包目录运行
-- 包目录通常包含 `include/`、`src/`、`cpkg.toml`
+- 默认将源码、头文件和 `cpkg.toml` 放在包根目录；已有的 `src/`、`include/` 等子目录布局仍受支持
 - `cpkg package generate` 会扫描当前目录下的 `.c/.cpp/.h/.hpp` 文件来生成 `CMakeLists.txt`
 - 包目录的 `CMakeLists.txt` 是派生产物：项目侧 `cpkg sync` 会依据 `cpkg.toml` 自动再生它，驱动仓库应当用 `.gitignore` 排除、不要提交
 
@@ -353,9 +353,9 @@ cpkg package create TrajectoryControl
 
 这会创建：
 
-- `TrajectoryControl/include/`
-- `TrajectoryControl/src/`
 - `TrajectoryControl/cpkg.toml`
+
+默认不创建 `src/` 或 `include/`，也不生成示例代码。将 `.c/.cpp/.h/.hpp` 文件直接放在 `TrajectoryControl/` 下，添加代码后在包目录中运行 `cpkg package generate`。
 
 ### 2. 初始化或迁移 `cpkg.toml`
 
