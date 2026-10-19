@@ -193,6 +193,7 @@ When a change needs to fetch a new crate, refresh `Cargo.lock`, or otherwise upd
 - Select the exact asset for the running target, require and verify its GitHub SHA-256 digest, and verify the staged binary before replacement.
 - Apply updates without an interactive confirmation, but never auto-elevate through `sudo` or UAC; permission failures must leave the installed executable unchanged.
 - Release builds must embed the exact Git tag so same-version `-fixN` updates are recognized and not repeatedly installed.
+- Package versions may include `-fixN`, but `--version` must keep printing only the base `major.minor.patch` version so existing updaters can verify staged binaries. The full release identity must retain the fix suffix.
 - Automatic update checks must not delay or fail normal commands when GitHub is slow or unreachable; choose a bounded, infrequent background check and respect offline operation.
 - Users must be able to persistently disable automatic update checks. Automatic checks only notify about official releases; installation remains explicit through `cpkg update`.
 - Start eligible terminal/online checks before executing the project command. After successful execution, show any ready cached update without waiting; unfinished checks may notify on a later run. A command that eventually fails may already have started its background check, but must not print an update notice.

@@ -18,7 +18,13 @@ use cpkg::{
 #[derive(Parser)]
 #[command(
     author,
-    version,
+    version = concat!(
+        env!("CARGO_PKG_VERSION_MAJOR"),
+        ".",
+        env!("CARGO_PKG_VERSION_MINOR"),
+        ".",
+        env!("CARGO_PKG_VERSION_PATCH")
+    ),
     about = "STM32CubeMX package manager for WTR projects",
     long_about = "cpkg manages STM32CubeMX-based firmware projects and WTR driver packages.\n\n\
 The project-side workflow uses `wtrproject.toml` to track direct dependencies, \
