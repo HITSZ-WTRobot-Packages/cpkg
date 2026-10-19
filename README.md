@@ -61,6 +61,22 @@ cpkg update
 
 更新过程中，`cpkg` 要求 Release 资源提供 SHA-256 digest 并完成校验，还会先对暂存的新二进制执行 `--version`，确认版本输出符合预期后才原地替换。命令不会请求确认，也不会自动使用 `sudo` 或触发其他提权；当前可执行文件所在的安装位置必须可写，否则更新会失败并保留原文件。需要更高权限时，请由用户自行以适当权限运行，或将 `cpkg` 安装到可写目录。
 
+默认启用自动检查，但**不会自动下载安装**：
+
+- 仅在 `stderr` 连接交互终端，且 `cpkg init -I`、在线的 `cpkg list`、`cpkg add` 或 `cpkg sync` 成功结束后触发；失败、`--offline`、本地包操作、`remove`、配置命令、帮助、版本和显式 `cpkg update` 都不会触发。
+- 前台只读写 `~/.cpkg/` 中的本地缓存并启动后台检查，不等待 GitHub。后台只请求官方 Release 元数据，单次请求超时为 3 秒，不重试；连接失败时静默结束，不改变原命令退出码。
+- 约每 24 小时尝试一次；失败也计入间隔，避免弱网环境下每次运行都重复连接。索引或组织镜像配置不会改变更新来源。
+- 检查结果写入缓存，新版本会在下次符合条件的命令结束时提示；同一 Release tag 只提醒一次，安装仍需用户执行 `cpkg update`。
+
+可以持久化关闭或重新启用检查：
+
+```bash
+cpkg config update-check disable
+cpkg config update-check enable
+```
+
+如果尚未创建全局配置，先运行 `cpkg config init`。对应配置项为 `~/.cpkg/config.toml` 的 `[update_check]` 表中的 `enabled = true`；旧配置未包含该项时也默认启用。自动检查不会创建或修改 `config.toml`。
+
 ### 从源码构建
 
 适合已经具备 Rust 开发环境、需要参与开发或想使用最新代码的用户。

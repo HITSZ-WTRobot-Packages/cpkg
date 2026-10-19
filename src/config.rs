@@ -29,6 +29,8 @@ pub struct GlobalConfig {
     pub index: Vec<IndexSourceConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub org: Vec<NamedOrgSource>,
+    #[serde(default)]
+    pub update_check: UpdateCheckConfig,
 }
 
 impl Default for GlobalConfig {
@@ -38,7 +40,20 @@ impl Default for GlobalConfig {
             default_org: None,
             index: Vec::new(),
             org: Vec::new(),
+            update_check: UpdateCheckConfig::default(),
         }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpdateCheckConfig {
+    pub enabled: bool,
+}
+
+impl Default for UpdateCheckConfig {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 
@@ -89,6 +104,7 @@ pub fn initialized_global_config_template() -> GlobalConfig {
             https_base: defaults.https_base,
             default_protocol: SubmoduleProtocol::Ssh,
         }],
+        update_check: UpdateCheckConfig::default(),
     }
 }
 
@@ -279,6 +295,23 @@ pub fn init_global_config(force: bool) -> Result<()> {
     let term = Term::stdout();
     term.write_line(&format!("Initialized global config at {}", path.display()))?;
     Ok(())
+}
+
+pub fn set_global_update_check(enabled: bool) -> Result<()> {
+    let path = global_config_path()?;
+    set_update_check_in_config_path(&path, enabled)?;
+    let status = if enabled { "Enabled" } else { "Disabled" };
+    Term::stdout().write_line(&format!(
+        "{status} background update checks in {}",
+        path.display()
+    ))?;
+    Ok(())
+}
+
+fn set_update_check_in_config_path(path: &Path, enabled: bool) -> Result<()> {
+    let mut config = load_existing_global_config_from_path(path)?;
+    config.update_check.enabled = enabled;
+    save_global_config_to_path(path, &config)
 }
 
 fn describe_index_source(source: &IndexSourceConfig) -> String {
@@ -572,7 +605,7 @@ mod tests {
         move_index_source_in_config_path, remove_index_source_from_config_path,
         remove_org_source_from_config_path, save_global_config_to_path,
         set_default_org_source_in_config_path, set_index_source_in_config_path,
-        upsert_org_source_in_config_path, validate_global_config,
+        set_update_check_in_config_path, upsert_org_source_in_config_path, validate_global_config,
     };
     use crate::project::SubmoduleProtocol;
     use crate::project::index::{DEFAULT_INDEX_FILENAME, DEFAULT_INDEX_URL};
@@ -633,15 +666,86 @@ mod tests {
     #[test]
     fn missing_config_path_loads_default_config() {
         let dir = make_temp_dir("load-default");
-        let config = load_global_config_from_path(&dir.join("missing.toml")).unwrap();
+        let path = dir.join("missing.toml");
+        let config = load_global_config_from_path(&path).unwrap();
         assert_eq!(config, GlobalConfig::default());
+        assert!(config.update_check.enabled);
+        assert!(!path.exists());
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn legacy_config_and_empty_update_check_table_default_to_enabled() {
+        let dir = make_temp_dir("legacy-update-check");
+        let path = dir.join("config.toml");
+        for content in [
+            "format_version = 1\n",
+            "format_version = 1\n[update_check]\n",
+        ] {
+            fs::write(&path, content).unwrap();
+            let config = load_global_config_from_path(&path).unwrap();
+            assert!(config.update_check.enabled);
+            assert_eq!(fs::read_to_string(&path).unwrap(), content);
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn update_check_toggle_preserves_org_and_index_settings() {
+        let dir = make_temp_dir("toggle-update-check");
+        let path = dir.join("config.toml");
+        let mut expected = initialized_global_config_template();
+        expected.default_org = Some("mirror".to_string());
+        expected.org.push(NamedOrgSource {
+            name: "mirror".to_string(),
+            ssh_base: Some("git@example.com:mirror".to_string()),
+            https_base: Some("https://example.com/mirror".to_string()),
+            default_protocol: SubmoduleProtocol::Https,
+        });
+        expected.index.insert(
+            0,
+            IndexSourceConfig {
+                path: Some("custom-index.json".to_string()),
+                ..IndexSourceConfig::default()
+            },
+        );
+        save_global_config_to_path(&path, &expected).unwrap();
+
+        for enabled in [false, true] {
+            set_update_check_in_config_path(&path, enabled).unwrap();
+            expected.update_check.enabled = enabled;
+            assert_eq!(load_global_config_from_path(&path).unwrap(), expected);
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn update_check_mutation_requires_existing_config() {
+        let dir = make_temp_dir("missing-update-check");
+        let path = dir.join("config.toml");
+        for enabled in [false, true] {
+            let error = set_update_check_in_config_path(&path, enabled).unwrap_err();
+            assert!(error.to_string().contains("cpkg config init"));
+            assert!(!path.exists());
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn update_check_rejects_unknown_fields_and_non_boolean_enabled() {
+        for content in [
+            "[update_check]\nenabled = false\nunknown = true\n",
+            "[update_check]\nenabled = 'false'\n",
+        ] {
+            assert!(toml::from_str::<GlobalConfig>(content).is_err());
+        }
     }
 
     #[test]
     fn validate_rejects_duplicate_org_names() {
         let error = validate_global_config(&GlobalConfig {
             format_version: CURRENT_GLOBAL_CONFIG_FORMAT_VERSION,
+            update_check: Default::default(),
             default_org: None,
             index: Vec::new(),
             org: vec![
@@ -668,6 +772,7 @@ mod tests {
     fn validate_rejects_index_entry_without_location() {
         let error = validate_global_config(&GlobalConfig {
             format_version: CURRENT_GLOBAL_CONFIG_FORMAT_VERSION,
+            update_check: Default::default(),
             default_org: None,
             index: vec![IndexSourceConfig::default()],
             org: Vec::new(),
@@ -689,6 +794,7 @@ mod tests {
             &path,
             &GlobalConfig {
                 format_version: CURRENT_GLOBAL_CONFIG_FORMAT_VERSION,
+                update_check: Default::default(),
                 default_org: None,
                 index: Vec::new(),
                 org: vec![NamedOrgSource {
@@ -728,6 +834,7 @@ mod tests {
             &path,
             &GlobalConfig {
                 format_version: CURRENT_GLOBAL_CONFIG_FORMAT_VERSION,
+                update_check: Default::default(),
                 default_org: None,
                 index: vec![IndexSourceConfig {
                     path: Some("first.json".to_string()),
@@ -764,6 +871,7 @@ mod tests {
             &path,
             &GlobalConfig {
                 format_version: CURRENT_GLOBAL_CONFIG_FORMAT_VERSION,
+                update_check: Default::default(),
                 default_org: None,
                 index: vec![IndexSourceConfig {
                     path: Some("first.json".to_string()),
@@ -806,6 +914,7 @@ mod tests {
             &path,
             &GlobalConfig {
                 format_version: CURRENT_GLOBAL_CONFIG_FORMAT_VERSION,
+                update_check: Default::default(),
                 default_org: None,
                 index: vec![
                     IndexSourceConfig {
@@ -839,6 +948,7 @@ mod tests {
             &path,
             &GlobalConfig {
                 format_version: CURRENT_GLOBAL_CONFIG_FORMAT_VERSION,
+                update_check: Default::default(),
                 default_org: None,
                 index: vec![
                     IndexSourceConfig {
@@ -876,6 +986,7 @@ mod tests {
             &path,
             &GlobalConfig {
                 format_version: CURRENT_GLOBAL_CONFIG_FORMAT_VERSION,
+                update_check: Default::default(),
                 default_org: Some("mirror".to_string()),
                 index: Vec::new(),
                 org: vec![NamedOrgSource {
@@ -900,6 +1011,7 @@ mod tests {
     fn validate_rejects_unknown_default_org() {
         let error = validate_global_config(&GlobalConfig {
             format_version: CURRENT_GLOBAL_CONFIG_FORMAT_VERSION,
+            update_check: Default::default(),
             default_org: Some("missing".to_string()),
             index: Vec::new(),
             org: Vec::new(),
@@ -958,6 +1070,7 @@ mod tests {
             &path,
             &GlobalConfig {
                 format_version: CURRENT_GLOBAL_CONFIG_FORMAT_VERSION,
+                update_check: Default::default(),
                 default_org: None,
                 index: Vec::new(),
                 org: vec![

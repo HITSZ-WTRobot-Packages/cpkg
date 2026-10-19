@@ -193,6 +193,8 @@ When a change needs to fetch a new crate, refresh `Cargo.lock`, or otherwise upd
 - Select the exact asset for the running target, require and verify its GitHub SHA-256 digest, and verify the staged binary before replacement.
 - Apply updates without an interactive confirmation, but never auto-elevate through `sudo` or UAC; permission failures must leave the installed executable unchanged.
 - Release builds must embed the exact Git tag so same-version `-fixN` updates are recognized and not repeatedly installed.
+- Automatic update checks must not delay or fail normal commands when GitHub is slow or unreachable; choose a bounded, infrequent background check and respect offline operation.
+- Users must be able to persistently disable automatic update checks. Automatic checks only notify about official releases; installation remains explicit through `cpkg update`.
 
 ### Testing
 - Place unit tests next to the code they validate using `#[cfg(test)] mod tests`.

@@ -15,7 +15,7 @@ description: "Use when an agent needs to operate the `cpkg` CLI for WTR-managed 
 - Pick the matching workflow first:
   - Firmware project workflow: manage `wtrproject.toml`, `Modules/`, or `cmake/wtr_modules.cmake` in a WTR-managed STM32CubeMX repository.
   - Driver package workflow: manage `cpkg.toml` and generated `CMakeLists.txt` inside a reusable driver package.
-  - Global config workflow: manage mirror and org settings in `~/.cpkg/config.toml`.
+  - Global config workflow: manage mirror, org, and automatic update-check preferences in `~/.cpkg/config.toml`.
   - Self-update workflow: update the installed `cpkg` executable from the official GitHub Releases.
 - Run `cpkg --help` and the specific subcommand `--help` before using an unfamiliar command.
 - Prefer `cpkg ...` in user repositories. Prefer `cargo run --offline -- ...` only when validating the CLI from the `cpkg` source tree itself.
@@ -36,6 +36,9 @@ description: "Use when an agent needs to operate the `cpkg` CLI for WTR-managed 
 - `-u`/`--update-index` conflicts with `--offline`, and an explicit refresh failure aborts the command instead of falling back to the stale cached copy.
 - Treat `cpkg update` as an online, direct update: it accesses GitHub, verifies the Release SHA-256 digest and staged binary version, and replaces the current executable without confirmation.
 - Do not expect automatic elevation. Run it only when the current executable's installation location is writable, or use user-chosen appropriate privileges.
+- Automatic update checks only fetch official Release metadata in a detached background process after a successful online `init -I`, `list`, `add`, or `sync` with terminal stderr. They never install, wait for GitHub in the foreground, or run for offline/local/config/help/version/manual-update paths.
+- Automatic attempts are approximately 24 hours apart, including failures, with a 3-second request timeout and no retries. A cached newer Release is announced on the next eligible command, once per tag.
+- Use `cpkg config update-check disable` or `enable` for persistent opt-out/control; initialize the global config first if absent. Missing preferences default to enabled without creating `config.toml`.
 
 ## Choose A Workflow
 
@@ -51,15 +54,15 @@ description: "Use when an agent needs to operate the `cpkg` CLI for WTR-managed 
 
 ### Global Config Workflow
 
-- Use [references/configuration.md](references/configuration.md) for `cpkg config ...`, index mirror order, named org sources, and protocol selection.
-- Use this path when the user needs to change where package indexes or Git remotes are resolved from.
+- Use [references/configuration.md](references/configuration.md) for `cpkg config ...`, index mirror order, named org sources, protocol selection, and automatic update-check preferences.
+- Use this path when the user needs to change package-index/Git-remote sources or disable/re-enable automatic update checks.
 
 ### Self-Update Workflow
 
 - Run `cpkg update`; do not require or create `wtrproject.toml` for this workflow.
 - Expect it to select the latest stable official GitHub Release for the current target, verify the required SHA-256 digest, and check the staged binary with `--version` before replacing the current executable in place.
 - If the installed version is already current, report that status; after a successful update, report the installed version shown by the command.
-- Keep this workflow separate from firmware dependencies, driver package metadata, and global mirror configuration.
+- Keep installation separate from firmware dependencies, driver package metadata, and mirror configuration. Automatic metadata checks only notify; turning them off does not disable explicit `cpkg update`.
 
 ## Report Clearly
 

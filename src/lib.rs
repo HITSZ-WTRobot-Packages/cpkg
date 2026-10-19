@@ -2,14 +2,15 @@ pub mod config;
 pub mod package;
 pub mod project;
 mod update;
+pub mod update_check;
 
 pub use update::update as update_cpkg;
 
 pub use config::{
-    IndexSourceConfig, add_global_index_source, clear_global_default_org_source,
+    IndexSourceConfig, UpdateCheckConfig, add_global_index_source, clear_global_default_org_source,
     init_global_config, move_global_index_source, remove_global_index_source,
     remove_global_org_source, set_global_default_org_source, set_global_index_source,
-    set_global_org_source, show_global_config, show_global_index_sources,
+    set_global_org_source, set_global_update_check, show_global_config, show_global_index_sources,
 };
 pub use package::{
     CMakeGenerator, Cpkg, DefaultFsScanner, Generator, Scanner, create as create_package,

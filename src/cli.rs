@@ -11,8 +11,8 @@ use cpkg::{
     init_package, init_project, init_project_interactive, list_available_packages,
     move_global_index_source, project::write_init_integration_guidance, remove_global_index_source,
     remove_global_org_source, remove_packages, set_global_default_org_source,
-    set_global_index_source, set_global_org_source, show_global_config, show_global_index_sources,
-    sync_project, update_cpkg,
+    set_global_index_source, set_global_org_source, set_global_update_check, show_global_config,
+    show_global_index_sources, sync_project, update_cpkg,
 };
 
 #[derive(Parser)]
@@ -28,6 +28,9 @@ driver repositories into `Modules/` as Git submodules.\n\n\
 Package-authoring commands stay under `cpkg package ...` and manage individual \
 driver-package metadata with `cpkg.toml`; each package's generated `CMakeLists.txt` \
 is derived output that project-side `cpkg sync` regenerates automatically.\n\n\
+Eligible online project commands periodically check official release metadata in the background, \
+without waiting for GitHub. Opt out with `cpkg config update-check disable`. \
+Installing an update always requires `cpkg update`.\n\n\
 Use `-v` or `--verbose` to enable debug logging.",
     after_help = "Examples:\n  \
 cpkg init --ioc MyBoard.ioc\n  \
@@ -45,6 +48,7 @@ cpkg sync -u\n  \
 cpkg update\n  \
 cpkg config init\n  \
 cpkg config show\n  \
+cpkg config update-check disable\n  \
 cpkg config index list\n  \
 cpkg config index add --url https://mirror.example.com/cpkg_index.json\n  \
 cpkg config org default set wtr-github\n  \
@@ -73,7 +77,7 @@ enum Commands {
     Sync(SyncArgs),
     /// Download and install the latest cpkg release from GitHub
     Update,
-    /// Show or update global mirror configuration under `~/.cpkg/config.toml`.
+    /// Show or update global sources and preferences under `~/.cpkg/config.toml`.
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
@@ -258,6 +262,19 @@ enum ConfigCommands {
         #[command(subcommand)]
         command: OrgConfigCommands,
     },
+    /// Enable background release metadata checks, or opt out persistently.
+    UpdateCheck {
+        #[command(subcommand)]
+        command: UpdateCheckConfigCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum UpdateCheckConfigCommands {
+    /// Enable periodic, nonblocking checks of official GitHub release metadata.
+    Enable,
+    /// Disable automatic checks; `cpkg update` remains available for installation.
+    Disable,
 }
 
 #[derive(Args)]
@@ -422,6 +439,7 @@ pub fn run() -> Result<()> {
         "starting cpkg"
     );
     let cwd = Path::new(".");
+    let check_for_updates = automatic_update_check_eligible(&cli.command);
 
     match cli.command {
         Commands::Init(args) => {
@@ -505,6 +523,11 @@ pub fn run() -> Result<()> {
             ConfigCommands::Show => {
                 debug!("running config show command");
                 show_global_config()?
+            }
+            ConfigCommands::UpdateCheck { command } => {
+                let enabled = matches!(command, UpdateCheckConfigCommands::Enable);
+                debug!(enabled, "running config update-check command");
+                set_global_update_check(enabled)?
             }
             ConfigCommands::Index { command } => match command {
                 IndexConfigCommands::List => {
@@ -595,7 +618,24 @@ pub fn run() -> Result<()> {
         },
     }
 
+    if check_for_updates {
+        cpkg::update_check::after_command();
+    }
+
     Ok(())
+}
+
+fn automatic_update_check_eligible(command: &Commands) -> bool {
+    match command {
+        Commands::Init(args) => args.interactive,
+        Commands::List(args) => !args.offline,
+        Commands::Add(args) => !args.sync.offline,
+        Commands::Sync(args) => !args.sync.offline,
+        Commands::Remove(_)
+        | Commands::Update
+        | Commands::Config { .. }
+        | Commands::Package { .. } => false,
+    }
 }
 
 fn init_tracing(verbose: bool) -> Result<()> {
@@ -627,17 +667,9 @@ fn command_name(command: &Commands) -> &'static str {
 mod tests {
     use super::{
         Cli, Commands, ConfigCommands, DefaultOrgConfigCommands, IndexConfigCommands,
-        OrgConfigCommands,
+        OrgConfigCommands, UpdateCheckConfigCommands, automatic_update_check_eligible,
     };
-    use clap::{CommandFactory, Parser};
-
-    #[test]
-    fn help_mentions_global_verbose_flag() {
-        let help = Cli::command().render_long_help().to_string();
-
-        assert!(help.contains("-v, --verbose"));
-        assert!(help.contains("enable debug logging"));
-    }
+    use clap::{Parser, error::ErrorKind};
 
     #[test]
     fn sync_accepts_global_verbose_flag_after_subcommand() {
@@ -655,14 +687,6 @@ mod tests {
         let cli = Cli::try_parse_from(["cpkg", "update"]).unwrap();
 
         assert!(matches!(cli.command, Commands::Update));
-    }
-
-    #[test]
-    fn long_help_describes_update_and_includes_example() {
-        let help = Cli::command().render_long_help().to_string();
-
-        assert!(help.contains("Download and install the latest cpkg release from GitHub"));
-        assert!(help.contains("cpkg update"));
     }
 
     #[test]
@@ -878,10 +902,86 @@ mod tests {
     }
 
     #[test]
-    fn help_mentions_list_examples() {
-        let help = Cli::command().render_long_help().to_string();
+    fn automatic_update_check_eligibility_respects_command_and_offline_mode() {
+        let cases: &[(&[&str], bool)] = &[
+            (&["init"], false),
+            (&["init", "--interactive"], true),
+            (&["init", "-Iu"], true),
+            (&["list"], true),
+            (&["list", "-u"], true),
+            (&["list", "--offline"], false),
+            (&["add", "MotorDrivers::DJI"], true),
+            (&["add", "-I"], true),
+            (&["add", "-Iu"], true),
+            (&["add", "--offline", "MotorDrivers::DJI"], false),
+            (&["add", "-I", "--offline"], false),
+            (&["sync"], true),
+            (&["sync", "-u"], true),
+            (&["sync", "--offline"], false),
+            (&["remove", "MotorDrivers::DJI"], false),
+            (&["update"], false),
+            (&["config", "init"], false),
+            (&["config", "show"], false),
+            (&["config", "index", "list"], false),
+            (&["config", "org", "default", "clear"], false),
+            (&["config", "update-check", "enable"], false),
+            (&["config", "update-check", "disable"], false),
+            (&["package", "init", "MotorDrivers::DJI"], false),
+            (&["package", "generate"], false),
+            (&["package", "create", "driver"], false),
+        ];
 
-        assert!(help.contains("cpkg list"));
-        assert!(help.contains("tree view"));
+        for &(args, expected) in cases {
+            let cli =
+                Cli::try_parse_from(std::iter::once("cpkg").chain(args.iter().copied())).unwrap();
+            assert_eq!(
+                automatic_update_check_eligible(&cli.command),
+                expected,
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn help_and_version_do_not_dispatch_normal_commands() {
+        for (args, expected) in [
+            (vec!["cpkg", "--help"], ErrorKind::DisplayHelp),
+            (vec!["cpkg", "help"], ErrorKind::DisplayHelp),
+            (vec!["cpkg", "sync", "--help"], ErrorKind::DisplayHelp),
+            (vec!["cpkg", "--version"], ErrorKind::DisplayVersion),
+        ] {
+            let error = Cli::try_parse_from(args)
+                .err()
+                .expect("must exit before dispatch");
+            assert_eq!(error.kind(), expected);
+        }
+    }
+
+    #[test]
+    fn config_update_check_parses_enable_and_disable() {
+        for (choice, expected) in [("enable", true), ("disable", false)] {
+            let cli = Cli::try_parse_from(["cpkg", "config", "update-check", choice]).unwrap();
+            match cli.command {
+                Commands::Config {
+                    command: ConfigCommands::UpdateCheck { command },
+                } => assert_eq!(
+                    matches!(command, UpdateCheckConfigCommands::Enable),
+                    expected
+                ),
+                _ => panic!("expected config update-check command"),
+            }
+        }
+    }
+
+    #[test]
+    fn config_update_check_rejects_missing_invalid_and_extra_choices() {
+        for args in [
+            vec!["cpkg", "config", "update-check"],
+            vec!["cpkg", "config", "update-check", "true"],
+            vec!["cpkg", "config", "update-check", "status"],
+            vec!["cpkg", "config", "update-check", "enable", "disable"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
     }
 }

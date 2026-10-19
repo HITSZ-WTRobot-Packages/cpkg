@@ -102,11 +102,48 @@ fn update_from_github(
     Ok(())
 }
 
-fn current_release_tag() -> String {
+pub(crate) fn current_release_tag() -> String {
     match option_env!("CPKG_RELEASE_TAG") {
         Some(tag) if !tag.is_empty() => tag.to_owned(),
         _ => format!("v{}", env!("CARGO_PKG_VERSION")),
     }
+}
+
+/// Compare official release identities rather than SemVer prerelease ordering for `-fixN`.
+pub(crate) fn release_is_newer(tag: &str, current_tag: &str) -> Result<bool> {
+    Ok(parse_release_tag(tag)? > parse_release_tag(current_tag)?)
+}
+
+fn update_check_builder() -> Result<github::UpdateBuilder> {
+    let current_tag = current_release_tag();
+    parse_release_tag(&current_tag)?;
+    let mut builder = github::Update::configure();
+    builder
+        .repo_owner(REPOSITORY_OWNER)
+        .repo_name(REPOSITORY_NAME)
+        .tag_prefix("v")
+        .target(self_update::get_target())
+        .bin_name("cpkg")
+        .current_version(&current_tag[1..])
+        .timeout(std::time::Duration::from_secs(3))
+        .retries(0)
+        .show_output(false)
+        .show_download_progress(false);
+    Ok(builder)
+}
+
+fn checked_latest_tag(updater: &github::Update) -> Result<String> {
+    let releases = updater.get_latest_release()?;
+    let latest = releases
+        .latest()
+        .ok_or_else(|| anyhow!("no cpkg GitHub release was found"))?;
+    parse_release_version(latest.version())?;
+    Ok(format!("v{}", latest.version()))
+}
+
+/// Fetch metadata only: never select an asset, download, or install an update.
+pub(crate) fn latest_release_tag() -> Result<String> {
+    checked_latest_tag(&update_check_builder()?.build()?)
 }
 
 fn ensure_supported_target(target: &str) -> Result<()> {
@@ -259,6 +296,11 @@ fn validate_version_probe(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use self_update::http_client::{HeaderMap, HttpClient, HttpResponse};
+    use std::io::Cursor;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     const SHA256: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -392,6 +434,92 @@ mod tests {
                 select_release_asset(&candidate, name).is_err(),
                 "accepted {digest}"
             );
+        }
+    }
+
+    struct MetadataClient {
+        body: Option<&'static str>,
+        calls: AtomicUsize,
+    }
+
+    struct MetadataResponse {
+        headers: HeaderMap,
+        body: &'static str,
+    }
+
+    impl HttpResponse for MetadataResponse {
+        fn headers(&self) -> &HeaderMap {
+            &self.headers
+        }
+
+        fn body(self: Box<Self>) -> Box<dyn std::io::Read> {
+            Box::new(Cursor::new(self.body))
+        }
+    }
+
+    impl HttpClient for MetadataClient {
+        fn get(
+            &self,
+            url: &str,
+            _headers: &HeaderMap,
+            timeout: Option<Duration>,
+        ) -> self_update::Result<Box<dyn HttpResponse>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            assert_eq!(
+                url,
+                "https://api.github.com/repos/HITSZ-WTRobot-Packages/cpkg/releases/latest"
+            );
+            assert_eq!(timeout, Some(Duration::from_secs(3)));
+            match self.body {
+                Some(body) => Ok(Box::new(MetadataResponse {
+                    headers: HeaderMap::new(),
+                    body,
+                })),
+                None => Err(self_update::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "GitHub timeout",
+                ))),
+            }
+        }
+    }
+
+    #[test]
+    fn metadata_check_accepts_fix_release_without_installable_assets() {
+        let client = Arc::new(MetadataClient {
+            body: Some(r#"{"tag_name":"v1.2.3-fix10","created_at":"2026-01-01","assets":[]}"#),
+            calls: AtomicUsize::new(0),
+        });
+        let updater = update_check_builder()
+            .unwrap()
+            .http_client(client.clone())
+            .build()
+            .unwrap();
+        let tag = checked_latest_tag(&updater).unwrap();
+        assert!(release_is_newer(&tag, "v1.2.3-fix9").unwrap());
+        assert!(!release_is_newer(&tag, "v1.2.4").unwrap());
+        assert_eq!(client.calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn metadata_check_rejects_bad_release_metadata_and_never_retries_failure() {
+        for body in [
+            None,
+            Some("not JSON"),
+            Some(r#"{"tag_name":"v1.2.4","assets":[]}"#),
+            Some(r#"{"tag_name":"1.2.4","created_at":"2026-01-01","assets":[]}"#),
+            Some(r#"{"tag_name":"v1.2.4-rc1","created_at":"2026-01-01","assets":[]}"#),
+        ] {
+            let client = Arc::new(MetadataClient {
+                body,
+                calls: AtomicUsize::new(0),
+            });
+            let updater = update_check_builder()
+                .unwrap()
+                .http_client(client.clone())
+                .build()
+                .unwrap();
+            assert!(checked_latest_tag(&updater).is_err(), "accepted {body:?}");
+            assert_eq!(client.calls.load(Ordering::Relaxed), 1);
         }
     }
 

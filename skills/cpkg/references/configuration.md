@@ -1,6 +1,6 @@
 # Global Configuration Workflow
 
-Use this workflow when the task is to configure where `cpkg` reads package indexes from or how it resolves repository remotes.
+Use this workflow when the task is to configure package indexes, repository remotes, or automatic update-check preferences.
 
 ## File Location
 
@@ -17,7 +17,7 @@ cpkg config init
 cpkg config init --force
 ```
 
-Use this before any `cpkg config index ...` or `cpkg config org ...` edits.
+Use this before any `cpkg config index ...`, `cpkg config org ...`, or `cpkg config update-check ...` edits.
 
 ### Inspect the current config
 
@@ -54,6 +54,20 @@ Rules:
 - A named org source should define at least one remote base.
 - The default protocol must match a defined remote base.
 - Project manifests may override the org name or protocol without mutating the global defaults.
+
+### Control automatic update checks
+
+```bash
+cpkg config update-check disable
+cpkg config update-check enable
+```
+
+Rules:
+- Requires an existing config file; run `cpkg config init` first if it is absent.
+- Stores `[update_check] enabled = false` or `true`, preserving index/org settings. Missing preferences default to enabled.
+- Automatic checks only run after successful online `init -I`, `list`, `add`, or `sync` when stderr is a terminal. Offline, local, failed, config, help/version, and explicit-update commands never trigger them.
+- The foreground never waits for GitHub. Detached checks only fetch official Release metadata, with a 3-second timeout, no retries, and approximately 24 hours between attempts, including failures.
+- A cached newer Release is announced on the next eligible command, once per tag. Automatic checks never install or create/change `config.toml`; `cpkg update` remains available when checks are disabled.
 
 ## Index Lookup Order
 
