@@ -65,9 +65,9 @@ cpkg config update-check enable
 Rules:
 - Requires an existing config file; run `cpkg config init` first if it is absent.
 - Stores `[update_check] enabled = false` or `true`, preserving index/org settings. Missing preferences default to enabled.
-- Automatic checks only run after successful online `init -I`, `list`, `add`, or `sync` when stderr is a terminal. Offline, local, failed, config, help/version, and explicit-update commands never trigger them.
+- Automatic checks start before online `init -I`, `list`, `add`, or `sync` when stderr is a terminal. Offline, local, config, help/version, and explicit-update commands never trigger them. A command that later fails may already have started a check, but must not show or consume a notice.
 - The foreground never waits for GitHub. Detached checks only fetch official Release metadata, with a 3-second timeout, no retries, and approximately 24 hours between attempts, including failures.
-- A cached newer Release is announced on the next eligible command, once per tag. Automatic checks never install or create/change `config.toml`; `cpkg update` remains available when checks are disabled.
+- After success, show a ready cached newer Release in the same invocation, once per tag. If the check is unfinished, do not wait; a later eligible successful command can show the result. Automatic checks never install or create/change `config.toml`; `cpkg update` remains available when checks are disabled.
 
 ## Index Lookup Order
 

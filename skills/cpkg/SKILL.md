@@ -36,8 +36,8 @@ description: "Use when an agent needs to operate the `cpkg` CLI for WTR-managed 
 - `-u`/`--update-index` conflicts with `--offline`, and an explicit refresh failure aborts the command instead of falling back to the stale cached copy.
 - Treat `cpkg update` as an online, direct update: it accesses GitHub, verifies the Release SHA-256 digest and staged binary version, and replaces the current executable without confirmation.
 - Do not expect automatic elevation. Run it only when the current executable's installation location is writable, or use user-chosen appropriate privileges.
-- Automatic update checks only fetch official Release metadata in a detached background process after a successful online `init -I`, `list`, `add`, or `sync` with terminal stderr. They never install, wait for GitHub in the foreground, or run for offline/local/config/help/version/manual-update paths.
-- Automatic attempts are approximately 24 hours apart, including failures, with a 3-second request timeout and no retries. A cached newer Release is announced on the next eligible command, once per tag.
+- Automatic update checks only fetch official Release metadata in a detached background process started before an online `init -I`, `list`, `add`, or `sync` with terminal stderr. They never install, wait for GitHub in the foreground, or run for offline/local/config/help/version/manual-update paths. A command that later fails may already have started a check, but must not show or consume a notice.
+- Automatic attempts are approximately 24 hours apart, including failures, with a 3-second request timeout and no retries. After success, show a ready newer Release in the same invocation, once per tag; unfinished checks may notify on a later eligible successful command without waiting.
 - Use `cpkg config update-check disable` or `enable` for persistent opt-out/control; initialize the global config first if absent. Missing preferences default to enabled without creating `config.toml`.
 
 ## Choose A Workflow

@@ -16,7 +16,20 @@ const RELEASE_FILENAME: &str = "update-check-release";
 const NOTIFIED_FILENAME: &str = "update-check-notified";
 const CHECK_INTERVAL: u64 = 24 * 60 * 60;
 
-/// Optionally show a cached notice and start a metadata-only background check.
+/// Start a metadata-only background check if one is due, without showing a notice.
+/// Command eligibility is determined by the caller; redirected stderr never participates.
+pub fn before_command() {
+    if !io::stderr().is_terminal() {
+        return;
+    }
+    let _ = (|| -> Result<()> {
+        let home = checked_home()?;
+        let enabled = load_global_config()?.update_check.enabled;
+        before_command_at(&home, enabled, epoch_seconds()?, spawn_worker)
+    })();
+}
+
+/// Show a ready cached notice after a successful command, without starting or waiting for work.
 /// Command eligibility is determined by the caller; redirected stderr never participates.
 pub fn after_command() {
     if !io::stderr().is_terminal() {
@@ -25,20 +38,13 @@ pub fn after_command() {
     let _ = (|| -> Result<()> {
         let home = checked_home()?;
         let enabled = load_global_config()?.update_check.enabled;
-        after_command_at(
-            &home,
-            enabled,
-            epoch_seconds()?,
-            &current_release_tag(),
-            |tag| {
-                writeln!(
-                    io::stderr().lock(),
-                    "A new cpkg release is available: {tag}. Run `cpkg update` to install it."
-                )?;
-                Ok(())
-            },
-            spawn_worker,
-        )
+        after_command_at(&home, enabled, &current_release_tag(), |tag| {
+            writeln!(
+                io::stderr().lock(),
+                "A new cpkg release is available: {tag}. Run `cpkg update` to install it."
+            )?;
+            Ok(())
+        })
     })();
 }
 
@@ -135,19 +141,35 @@ fn read_optional(path: &Path) -> Result<Option<String>> {
     }
 }
 
-fn after_command_at(
+fn before_command_at(
     home: &Path,
     enabled: bool,
     now: u64,
-    current_tag: &str,
-    notify: impl FnOnce(&str) -> Result<()>,
     spawn: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     if !enabled {
         return Ok(());
     }
     let cache = Cache::load(home)?;
-    // Validate even when the cache is empty, before reserving any work.
+    if cache.is_due(now) {
+        fs::create_dir_all(home)?;
+        // Reserve the attempt before spawning: failed spawns and failed requests both throttle.
+        fs::write(home.join(ATTEMPT_FILENAME), now.to_string())?;
+        spawn()?;
+    }
+    Ok(())
+}
+
+fn after_command_at(
+    home: &Path,
+    enabled: bool,
+    current_tag: &str,
+    notify: impl FnOnce(&str) -> Result<()>,
+) -> Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    let cache = Cache::load(home)?;
     release_is_newer(current_tag, current_tag)?;
     if let Some(tag) = cache.latest_tag.as_deref() {
         if cache.notified_tag.as_deref() != Some(tag) && release_is_newer(tag, current_tag)? {
@@ -155,12 +177,6 @@ fn after_command_at(
             // Do not consume a notice if writing it to stderr failed.
             fs::write(home.join(NOTIFIED_FILENAME), tag)?;
         }
-    }
-    if cache.is_due(now) {
-        fs::create_dir_all(home)?;
-        // Reserve the attempt before spawning: failed spawns and failed requests both throttle.
-        fs::write(home.join(ATTEMPT_FILENAME), now.to_string())?;
-        spawn()?;
     }
     Ok(())
 }
@@ -214,57 +230,122 @@ mod tests {
     }
 
     #[test]
+    fn release_ready_between_begin_and_success_notifies_in_the_same_invocation() {
+        let home = TestHome::new();
+        let now = 1_000_000;
+        let started = Cell::new(false);
+        before_command_at(&home.0, true, now, || {
+            started.set(true);
+            Ok(())
+        })
+        .unwrap();
+        assert!(started.get());
+        assert!(!home.0.join(RELEASE_FILENAME).exists());
+
+        // The detached worker finishes while the foreground command is running.
+        check_at(&home.0, true, now + 1, || Ok("v1.2.4".to_owned())).unwrap();
+        let notices = RefCell::new(Vec::new());
+        after_command_at(&home.0, true, "v1.2.3", |tag| {
+            notices.borrow_mut().push(tag.to_owned());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(*notices.borrow(), ["v1.2.4"]);
+    }
+
+    #[test]
+    fn unfinished_check_does_not_delay_success_and_can_notify_once_later() {
+        let home = TestHome::new();
+        let now = 1_000_000;
+        before_command_at(&home.0, true, now, || Ok(())).unwrap();
+
+        // No worker result is ready. Success must return before the worker completes.
+        after_command_at(&home.0, true, "v1.2.3", |_| {
+            panic!("an unfinished check must not notify")
+        })
+        .unwrap();
+        assert!(!home.0.join(RELEASE_FILENAME).exists());
+        assert!(!home.0.join(NOTIFIED_FILENAME).exists());
+        assert_eq!(Cache::load(&home.0).unwrap().last_attempt, Some(now));
+
+        check_at(&home.0, true, now + 1, || Ok("v1.2.4".to_owned())).unwrap();
+        let notices = RefCell::new(Vec::new());
+        for time in [now + 2, now + 3] {
+            before_command_at(&home.0, true, time, || {
+                panic!("the in-flight check must already have reserved the interval")
+            })
+            .unwrap();
+            after_command_at(&home.0, true, "v1.2.3", |tag| {
+                notices.borrow_mut().push(tag.to_owned());
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert_eq!(*notices.borrow(), ["v1.2.4"]);
+    }
+
+    #[test]
+    fn begin_does_not_consume_cached_notice_when_the_command_fails() {
+        let home = TestHome::new();
+        let now = 1_000_000;
+        check_at(&home.0, true, 100, || Ok("v1.2.4".to_owned())).unwrap();
+        let started = Cell::new(false);
+        before_command_at(&home.0, true, now, || {
+            started.set(true);
+            Ok(())
+        })
+        .unwrap();
+        assert!(started.get());
+        assert!(!home.0.join(NOTIFIED_FILENAME).exists());
+
+        // A failed command skips the after stage; the next successful command may notify.
+        before_command_at(&home.0, true, now + 1, || {
+            panic!("a failed foreground command must not undo the attempt reservation")
+        })
+        .unwrap();
+        let notices = RefCell::new(Vec::new());
+        for _ in 0..2 {
+            after_command_at(&home.0, true, "v1.2.3", |tag| {
+                notices.borrow_mut().push(tag.to_owned());
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert_eq!(*notices.borrow(), ["v1.2.4"]);
+    }
+
+    #[test]
     fn unsuccessful_check_and_failed_spawn_throttle_until_the_next_day() {
         let home = TestHome::new();
         let now = 1_000_000;
         assert!(check_at(&home.0, true, now, || bail!("unreachable GitHub")).is_err());
         let spawned = Cell::new(0);
         for time in [now, now + 1, now + CHECK_INTERVAL - 1] {
-            after_command_at(
-                &home.0,
-                true,
-                time,
-                "v1.2.3",
-                |_| panic!("failed checks must not produce notices"),
-                || {
-                    spawned.set(spawned.get() + 1);
-                    Ok(())
-                },
-            )
+            before_command_at(&home.0, true, time, || {
+                spawned.set(spawned.get() + 1);
+                Ok(())
+            })
+            .unwrap();
+            after_command_at(&home.0, true, "v1.2.3", |_| {
+                panic!("failed checks must not produce notices")
+            })
             .unwrap();
         }
         assert_eq!(spawned.get(), 0);
         assert!(
-            after_command_at(
-                &home.0,
-                true,
-                now + CHECK_INTERVAL,
-                "v1.2.3",
-                |_| panic!("failed checks must not produce notices"),
-                || bail!("spawn failed"),
-            )
+            before_command_at(&home.0, true, now + CHECK_INTERVAL, || bail!(
+                "spawn failed"
+            ))
             .is_err()
         );
-        after_command_at(
-            &home.0,
-            true,
-            now + CHECK_INTERVAL + 1,
-            "v1.2.3",
-            |_| panic!("unexpected notice"),
-            || panic!("failed spawn must also throttle"),
-        )
+        before_command_at(&home.0, true, now + CHECK_INTERVAL + 1, || {
+            panic!("failed spawn must also throttle")
+        })
         .unwrap();
-        after_command_at(
-            &home.0,
-            true,
-            now + 2 * CHECK_INTERVAL,
-            "v1.2.3",
-            |_| panic!("unexpected notice"),
-            || {
-                spawned.set(spawned.get() + 1);
-                Ok(())
-            },
-        )
+        before_command_at(&home.0, true, now + 2 * CHECK_INTERVAL, || {
+            spawned.set(spawned.get() + 1);
+            Ok(())
+        })
         .unwrap();
         assert_eq!(spawned.get(), 1);
     }
@@ -277,29 +358,21 @@ mod tests {
         for (time, tag) in [(now, "v1.2.3-fix1"), (now + CHECK_INTERVAL, "v1.2.3-fix2")] {
             check_at(&home.0, true, time, || Ok(tag.to_owned())).unwrap();
             for invocation in 0..2 {
-                after_command_at(
-                    &home.0,
-                    true,
-                    time + invocation,
-                    "v1.2.3",
-                    |tag| {
-                        notices.borrow_mut().push(tag.to_owned());
-                        Ok(())
-                    },
-                    || panic!("fresh metadata must throttle requests"),
-                )
+                before_command_at(&home.0, true, time + invocation, || {
+                    panic!("fresh metadata must throttle requests")
+                })
+                .unwrap();
+                after_command_at(&home.0, true, "v1.2.3", |tag| {
+                    notices.borrow_mut().push(tag.to_owned());
+                    Ok(())
+                })
                 .unwrap();
             }
             // A worker refreshing metadata cannot erase the parent's consumed notice.
             check_at(&home.0, true, time + 2, || Ok(tag.to_owned())).unwrap();
-            after_command_at(
-                &home.0,
-                true,
-                time + 3,
-                "v1.2.3",
-                |_| panic!("refresh repeated the same release notice"),
-                || panic!("unexpected request"),
-            )
+            after_command_at(&home.0, true, "v1.2.3", |_| {
+                panic!("refresh repeated the same release notice")
+            })
             .unwrap();
         }
         assert_eq!(*notices.borrow(), ["v1.2.3-fix1", "v1.2.3-fix2"]);
@@ -316,14 +389,9 @@ mod tests {
         ] {
             let home = TestHome::new();
             check_at(&home.0, true, 100, || Ok(cached.to_owned())).unwrap();
-            after_command_at(
-                &home.0,
-                true,
-                101,
-                current,
-                |_| panic!("obsolete notice for {cached} on {current}"),
-                || panic!("unexpected request"),
-            )
+            after_command_at(&home.0, true, current, |_| {
+                panic!("obsolete notice for {cached} on {current}")
+            })
             .unwrap();
         }
     }
@@ -339,14 +407,15 @@ mod tests {
             let home = TestHome::new();
             fs::write(home.0.join(filename), value).unwrap();
             assert!(
-                after_command_at(
-                    &home.0,
-                    true,
-                    1_000_000,
-                    "v1.2.3",
-                    |_| panic!("invalid state must not notify"),
-                    || panic!("invalid state must not launch work"),
-                )
+                before_command_at(&home.0, true, 1_000_000, || {
+                    panic!("invalid state must not launch work")
+                })
+                .is_err()
+            );
+            assert!(
+                after_command_at(&home.0, true, "v1.2.3", |_| {
+                    panic!("invalid state must not notify")
+                })
                 .is_err()
             );
         }
@@ -356,21 +425,29 @@ mod tests {
     fn opt_out_prevents_cached_notice_spawn_fetch_and_cache_creation() {
         let home = TestHome::new();
         check_at(&home.0, true, 100, || Ok("v1.2.4".to_owned())).unwrap();
-        after_command_at(
-            &home.0,
-            false,
-            1_000_000,
-            "v1.2.3",
-            |_| panic!("disabled checker must not notify"),
-            || panic!("disabled checker must not spawn"),
-        )
+        before_command_at(&home.0, false, 1_000_000, || {
+            panic!("disabled checker must not spawn")
+        })
+        .unwrap();
+        after_command_at(&home.0, false, "v1.2.3", |_| {
+            panic!("disabled checker must not notify")
+        })
         .unwrap();
         let missing = home.0.join("missing");
+        before_command_at(&missing, false, 1_000_000, || {
+            panic!("disabled checker must not spawn")
+        })
+        .unwrap();
+        after_command_at(&missing, false, "v1.2.3", |_| {
+            panic!("disabled checker must not notify")
+        })
+        .unwrap();
         check_at(&missing, false, 1_000_000, || {
             panic!("disabled worker must not fetch")
         })
         .unwrap();
         assert!(!missing.exists());
+        assert!(!home.0.join(NOTIFIED_FILENAME).exists());
         assert_eq!(
             fs::read_to_string(home.0.join(ATTEMPT_FILENAME)).unwrap(),
             "100"
@@ -382,28 +459,14 @@ mod tests {
         let home = TestHome::new();
         check_at(&home.0, true, 100, || Ok("v1.2.4".to_owned())).unwrap();
         assert!(
-            after_command_at(
-                &home.0,
-                true,
-                101,
-                "v1.2.3",
-                |_| bail!("stderr unavailable"),
-                || panic!("unexpected request"),
-            )
-            .is_err()
+            after_command_at(&home.0, true, "v1.2.3", |_| bail!("stderr unavailable")).is_err()
         );
         let notified = Cell::new(false);
-        after_command_at(
-            &home.0,
-            true,
-            102,
-            "v1.2.3",
-            |_| {
-                notified.set(true);
-                Ok(())
-            },
-            || panic!("unexpected request"),
-        )
+        after_command_at(&home.0, true, "v1.2.3", |tag| {
+            assert_eq!(tag, "v1.2.4");
+            notified.set(true);
+            Ok(())
+        })
         .unwrap();
         assert!(notified.get());
     }

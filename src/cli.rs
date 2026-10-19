@@ -28,8 +28,9 @@ driver repositories into `Modules/` as Git submodules.\n\n\
 Package-authoring commands stay under `cpkg package ...` and manage individual \
 driver-package metadata with `cpkg.toml`; each package's generated `CMakeLists.txt` \
 is derived output that project-side `cpkg sync` regenerates automatically.\n\n\
-Eligible online project commands periodically check official release metadata in the background, \
-without waiting for GitHub. Opt out with `cpkg config update-check disable`. \
+Eligible online project commands start periodic official release metadata checks in the background \
+before execution, without waiting for GitHub. Ready results are shown after success; unfinished \
+checks may notify on a later run. Opt out with `cpkg config update-check disable`. \
 Installing an update always requires `cpkg update`.\n\n\
 Use `-v` or `--verbose` to enable debug logging.",
     after_help = "Examples:\n  \
@@ -440,6 +441,9 @@ pub fn run() -> Result<()> {
     );
     let cwd = Path::new(".");
     let check_for_updates = automatic_update_check_eligible(&cli.command);
+    if check_for_updates {
+        cpkg::update_check::before_command();
+    }
 
     match cli.command {
         Commands::Init(args) => {
